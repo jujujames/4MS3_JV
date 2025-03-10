@@ -36,13 +36,19 @@ readr::write_rds(toronto_bound, "data/toronto_bound_CSD.rds")
 # 2) Adjust EMTU GTFS -----
 ttc_gtfs_raw <- gtfstools::read_gtfs("data-raw/ttc_gtfs.zip")
 
+# add shape_id info on stop_times
+ttc_gtfs_raw$stop_times[ttc_gtfs_raw$trips,on = "trip_id",shape_id := i.shape_id]
+
+ttc_gtfs <- gtfstools::filter_by_shape_id(ttc_gtfs_raw,"1048831")
+
+gtfs2gps::write_gtfs(ttc_gtfs,"data/gtfs_ttc_1048831.zip")
+
 # exporting temporal intersections ---------------------------
+# chose random timed trip ID's
+ttc_gtfs_tmp <- gtfstools::filter_by_shape_id(ttc_gtfs_raw,c("1050126","1049205"))
+ttc_gtfs_tmp <- gtfstools::filter_by_trip_id(ttc_gtfs_tmp,c("48337466","48354014"))
 
-
-sp_gtfs_tmp <- gtfstools::filter_by_shape_id(sp_gtfs_raw,c("540298_ida","502070_ida"))
-sp_gtfs_tmp <- gtfstools::filter_by_trip_id(sp_gtfs_tmp,c("502070_ida_2_6","540298_ida_0_36"))
-
-gps_tmp <- gtfs2gps::gtfs2gps(sp_gtfs_tmp)
+gps_tmp <- gtfs2gps::gtfs2gps(ttc_gtfs_tmp)
 gps_tmp <- gtfs2gps::adjust_speed(gps_tmp)
 
-readr::write_rds(x = gps_tmp, "data/emtu_intersection_gps.rds")
+readr::write_rds(x = gps_tmp, "data/ttc_intersection_gps.rds")
