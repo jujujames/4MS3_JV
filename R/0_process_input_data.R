@@ -43,10 +43,9 @@ ttc_gtfs <- gtfstools::filter_by_shape_id(ttc_gtfs_raw,"1048831")
 
 gtfs2gps::write_gtfs(ttc_gtfs,"data/gtfs_ttc_1048831.zip")
 
-# exporting temporal intersections ---------------------------
-# chose random timed trip ID's
-ttc_gtfs_tmp <- gtfstools::filter_by_shape_id(ttc_gtfs_raw,c("1050126","1049205"))
-ttc_gtfs_tmp <- gtfstools::filter_by_trip_id(ttc_gtfs_tmp,c("48337466","48354014"))
+#Finding intersecting trips...I did this by manually sifting through the GTFS files
+ttc_gtfs_tmp <- gtfstools::filter_by_shape_id(ttc_gtfs_raw,c("1048833","1049212"))
+ttc_gtfs_tmp <- gtfstools::filter_by_trip_id(ttc_gtfs_tmp,c("48337409","48334845"))
 
 gps_tmp <- gtfs2gps::gtfs2gps(ttc_gtfs_tmp)
 gps_tmp <- gtfs2gps::adjust_speed(gps_tmp)
