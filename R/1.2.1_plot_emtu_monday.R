@@ -14,7 +14,7 @@ easypackages::packages('geobr', 'magick', 'gtfs2gps',
 
 #  READ gps ----
 
-sp_gtfs <- gtfstools::read_gtfs("data/gtfs_spo_emtu_2019-06_423032_ida.zip")
+ttc_gtfs <- gtfstools::read_gtfs("data/gtfs_ttc_1048831.zip")
 
 # sunday
 tmp_gtfs <- gtfstools::filter_by_weekday( sp_gtfs,"monday")
