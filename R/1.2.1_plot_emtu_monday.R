@@ -17,8 +17,8 @@ easypackages::packages('geobr', 'magick', 'gtfs2gps',
 ttc_gtfs <- gtfstools::read_gtfs("data/gtfs_ttc_1048831.zip")
 
 # sunday
-tmp_gtfs <- gtfstools::filter_by_weekday( sp_gtfs,"monday")
-sp_gps <- progressr::with_progress( 
+tmp_gtfs <- gtfstools::filter_by_weekday( ttc_gtfs,"monday")
+ttc_gps <- progressr::with_progress( 
   gtfs2gps::gtfs2gps(tmp_gtfs) 
 )
 
@@ -28,7 +28,7 @@ time_end = "10:00:00"
 
 
 # check start / end time
-gps_dt <- rbind(sp_gps[,day := "monday"]) %>% 
+gps_dt <- rbind(ttc_gps[,day := "monday"]) %>% 
   .[!is.na(timestamp)] %>% 
   .[,timestamp := data.table::as.ITime(timestamp)] %>% 
   .[,timestart := timestamp[1],by = .(trip_number,day)] %>% 
@@ -58,7 +58,7 @@ view_tmp_stops <- data.table::copy(tmp_stops) %>%
                            ,  y = "Y"
                            , multipoint_id = "shape_id") %>%
   sf::st_set_crs(4326) %>%
-  sf::st_transform(32723) %>%
+  sf::st_transform(32617) %>%
   mapview()
 
 
@@ -75,7 +75,7 @@ tmp_line <- data.table::copy(tmp_gps) %>%
 # bounding box
 tmp_gps_bbox <- tmp_line %>%
   sf::st_transform(4326) %>%
-  sf::st_transform(32723) %>%
+  sf::st_transform(32617) %>%
   sf::st_buffer(x = .,dist = 8000) %>%
   sf::st_transform(4326) %>%
   sf::st_bbox() %>%
@@ -100,11 +100,11 @@ view_osm_bbox
 # read tile -----
 ggmap::file_drawer()
 dir(file_drawer())
-base_map <- ggmap::get_stamenmap(bbox = c(left = osm_bbox[1],
+base_map <- ggmap::get_stadiamap(bbox = c(left = osm_bbox[1],
                                           bottom = osm_bbox[2],
                                           right = osm_bbox[3],
                                           top = osm_bbox[4]),
-                                 maptype = "terrain",
+                                 maptype = "stamen_terrain",
                                  crop = TRUE,
                                  zoom = 12)
 
