@@ -140,11 +140,11 @@ rgl::clear3d()
 plot_gg(list_plot, height = nrow(base_map)/200
         , width = ncol(base_map)/200, scale = 100
         , raytrace = FALSE, windowsize = c(1200, 1200),
-        fov = 70.0000000, zoom = 0.1783865, theta = 69.0010533, phi = 13.9570765
+        fov = 160.50793457, zoom = 0.06098146, theta = -17.70462324, phi = 4.06868197
         ,  max_error = 0.01, verbose = TRUE) 
 
 # find angles
-# rayshader::render_camera(theta = NULL,phi = NULL,zoom = NULL,fov = NULL)
+#rayshader::render_camera(theta = NULL,phi = NULL,zoom = NULL,fov = NULL)
 
 # add scaling factor
 scale_altitude <- 5

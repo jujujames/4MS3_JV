@@ -1,15 +1,23 @@
 # Load ----
 
-# load libraries
 rm(list=ls())
 gc(reset = TRUE)
-easypackages::packages('geobr', 'magick', 'gtfs2gps', 
-                       'data.table', 'sf', 'mapview', 'progressr',
-                       'magrittr', 'dplyr', 'ggnewscale',
-                       'ggplot2', 'ggmap', 'raster', 'terra',
-                       'rayshader', 'rayrender', 'rayimage')
-
-
+easypackages::packages('geobr'
+                       , 'magick'
+                       , 'gtfs2gps'
+                       , 'data.table'
+                       , 'sf'
+                       , 'mapview'
+                       , 'magrittr'
+                       , 'dplyr'
+                       , 'ggnewscale'
+                       , 'ggplot2'
+                       , 'rayshader'
+                       , 'rayrender'
+                       , 'rayimage'
+                       , 'ggmap'
+                       , 'raster'
+                       , 'magick')
 
 
 #  READ gps ----
@@ -17,10 +25,8 @@ easypackages::packages('geobr', 'magick', 'gtfs2gps',
 ttc_gtfs <- gtfstools::read_gtfs("data/gtfs_ttc_1048831.zip")
 
 # sunday
-tmp_gtfs <- gtfstools::filter_by_weekday( ttc_gtfs,"monday")
-ttc_gps <- progressr::with_progress( 
-  gtfs2gps::gtfs2gps(tmp_gtfs) 
-)
+tmp_gtfs <- gtfstools::filter_by_weekday( ttc_gtfs,"sunday")
+ttc_gps <- gtfs2gps::gtfs2gps(tmp_gtfs)
 
 # define time windown
 time_start = "05:00:00"
@@ -28,7 +34,7 @@ time_end = "10:00:00"
 
 
 # check start / end time
-gps_dt <- rbind(ttc_gps[,day := "monday"]) %>% 
+gps_dt <- rbind(ttc_gps[,day := "sunday"]) %>% 
   .[!is.na(timestamp)] %>% 
   .[,timestamp := data.table::as.ITime(timestamp)] %>% 
   .[,timestart := timestamp[1],by = .(trip_number,day)] %>% 
@@ -96,7 +102,6 @@ view_osm_bbox <- sf::st_bbox(tmp_gps_bbox) %>%
   mapview()
 
 view_osm_bbox
-
 # read tile -----
 ggmap::file_drawer()
 dir(file_drawer())
@@ -153,8 +158,8 @@ rgl::clear3d()
 plot_gg(list_plot, height = nrow(base_map)/200
         , width = ncol(base_map)/200, scale = 100
         , raytrace = FALSE, windowsize = c(1200, 1200),
-        fov = 155.0611572, zoom = 0.1039339 
-        , theta = -1.1449540, phi = 12.2367451
+        fov = 155.06115723, zoom = 0.09427112 
+        , theta = 214.36781166, phi = -3.55911523
         ,  max_error = 0.001, verbose = TRUE) 
 
 #  rayshader::render_camera()
@@ -278,7 +283,7 @@ rayshader::render_label(heightmap = elev_matrix
                         , zscale = 100
                         , textsize = 2.5
                         , linewidth = 3
-                        , adjustvec = c(2.5,0)
+                        , adjustvec = c(1.9,-0.00)
                         , extent = attr(elev_matrix, "extent")
                         , fonttype = "standard"
                         , text = tmp_stops1[,.SD[1],by = trip_number]$text_plot
@@ -291,7 +296,7 @@ rayshader::render_label(heightmap = elev_matrix
                         , textsize = 2.5
                         , linewidth = 0
                         , alpha = 0
-                        , adjustvec = -c(1.5,0.35)
+                        , adjustvec = -c(1.05,0.25)
                         , extent = attr(elev_matrix, "extent")
                         , fonttype = "standard"
                         , text = tmp_stops1[,.SD[.N],by = trip_number]$text_plot
@@ -300,5 +305,5 @@ rayshader::render_label(heightmap = elev_matrix
 # 6) saving----
 dir.create("figures")
 rayshader::render_snapshot(filename = "figures/12_monday.png"
-                           , width = 1000
-                           , height = 2000)
+                           ,width = 1000
+                           ,height = 2000)
