@@ -15,14 +15,15 @@ easypackages::packages('geobr', 'magick', 'gtfs2gps',
 install.packages("cancensus")
 library(cancensus)
 
-options(cancensus.api_key = "CensusMapper_08b53dd19db8e68621df4b7b19853e48")
+#options(cancensus.api_key = "CensusMapper_08b53dd19db8e68621df4b7b19853e48")
 
 
 toronto_bound <- cancensus::get_census(
   dataset = "CA21",   
   regions = list(CSD = "3520005"),  
   level = "CSD",      
-  geo_format = "sf"
+  geo_format = "sf",
+  use_cache = TRUE
 )
 
 toronto_bound <- sf::st_transform(toronto_bound, 4326)  
