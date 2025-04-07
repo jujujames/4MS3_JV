@@ -221,7 +221,7 @@ tmp_stops_id[,N := .N,by = stop_id]
 rayshader::render_points(extent = raster::extent(tmp_gps_bbox),
                          lat = tmp_stops_id$Y, long = tmp_stops_id$X,
                          altitude = tmp_stops_id$new_scale_altitude,
-                         size = 3.5, zscale = 100,
+                         size = 2.5, zscale = 100,
                          clear_previous = TRUE, color = "red")
 
 # vertical vertical lines 
