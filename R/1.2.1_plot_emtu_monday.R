@@ -16,13 +16,13 @@ easypackages::packages('geobr', 'magick', 'gtfs2gps',
 
 ttc_gtfs <- gtfstools::read_gtfs("data/gtfs_ttc_1048831.zip")
 
-# sunday
+# Monday
 tmp_gtfs <- gtfstools::filter_by_weekday( ttc_gtfs,"monday")
 ttc_gps <- progressr::with_progress( 
   gtfs2gps::gtfs2gps(tmp_gtfs) 
 )
 
-# define time windown
+# define time window
 time_start = "05:00:00"
 time_end = "10:00:00"
 
@@ -224,38 +224,45 @@ rayshader::render_points(extent = raster::extent(tmp_gps_bbox),
                          size = 2.5, zscale = 100,
                          clear_previous = TRUE, color = "red")
 
-# vertical vertical lines 
-unique_shape_id <- unique(tmp_stops$shape_id)
-scale_color_shape_id <- viridis::viridis(n = 3)
+# Add Vertical Lines at Stops ---
 
-for(i in seq_along(unique_shape_id)){ # i  = 1
+min_time_in_window <- min(tmp_stops$time, na.rm = TRUE)
+# Prepare data subset with stops, including coordinates and calculated altitude
+tmp_stops_for_lines <- data.table::copy(tmp_stops) %>%
+  # Calculate altitude relative to the overall minimum time in the window
+  .[, new_scale_altitude := (time - min_time_in_window) * scale_altitude]
+
+# Get unique trip numbers from this prepared data
+unique_trip_numbers_in_window <- unique(tmp_stops_for_lines$trip_number)
+# Select last trip to render paths from
+last_trip_number <- max(unique_trip_numbers_in_window, na.rm = TRUE)
+last_trip_stops <- tmp_stops_for_lines[trip_number == last_trip_number, ]
+
+# Loop through each stop
+for (i in 1:nrow(last_trip_stops)) {
+  stop_lat <- last_trip_stops$Y[i]
+  stop_lon <- last_trip_stops$X[i]
+  stop_alt <- last_trip_stops$new_scale_altitude[i]
+  base_alt <- 1
   
-  tmp_stops1 <- data.table::copy(tmp_stops) 
-  tmp_stops1 <- tmp_stops1[shape_id == unique_shape_id[i],]
-  tmp_stops1[, new_scale_altitude := ( time - min(time)) * scale_altitude]
+  # Define the coordinates for the 2-point vertical path
+  line_lats <- c(stop_lat, stop_lat)     
+  line_lons <- c(stop_lon, stop_lon)     
+  line_alts <- c(base_alt, round(stop_alt))
   
-  for(j in tail(tmp_stops1$trip_number,1)){ #  j = tail(tmp_stops1$trip_number,1)
-    
-    tmp_stops2 <- data.table::copy(tmp_stops1) %>% 
-      .[shape_id == unique_shape_id[i] & trip_number == j & 
-          as.numeric(dist) != 0,]
-    
-    for(k in 1:uniqueN(tmp_stops2$stop_id)){ # k = 1
-      
-      rayshader::render_points(extent = raster::extent(tmp_gps_bbox),
-                               lat  = tmp_stops2[,Y][k],
-                               long = tmp_stops2[,X][k],
-                               altitude = 1:(tmp_stops2[,new_scale_altitude][k]),
-                               size = 0.5, zscale = 100,
-                               clear_previous = F
-                               #, color = scale_color_shape_id[i]
-                               , color = "black"
-      )
-    }
-  }
+  # Draw the vertical line as a path
+  rayshader::render_path(
+    extent = raster::extent(tmp_gps_bbox), 
+    lat = line_lats,
+    long = line_lons,
+    altitude = line_alts, 
+    zscale = 100,            
+    linewidth = 1,     
+    clear_previous = FALSE,
+    color = "black")
 }
 
-# add labels
+# add labels ---
 
 tmp_stops1 <- data.table::copy(tmp_stops) %>% 
   .[, new_scale_altitude := ( time - min(time) ) * scale_altitude] %>% 
@@ -271,34 +278,47 @@ elev_matrix <- raster::raster(nrows=808, ncols=964)
 values(elev_matrix) <- 0
 raster::extent(elev_matrix) <- raster::extent(tmp_gps_bbox)
 
-rayshader::render_label(heightmap = elev_matrix
-                        ,lat = tmp_stops1[,.SD[1],by = trip_number]$Y
-                        , long = tmp_stops1[,.SD[1],by = trip_number]$X
-                        , altitude = tmp_stops1[,.SD[1],by = trip_number]$new_scale_altitude
-                        , zscale = 100
-                        , textsize = 2.5
-                        , linewidth = 3
-                        , adjustvec = c(2.5,0)
-                        , extent = attr(elev_matrix, "extent")
-                        , fonttype = "standard"
-                        , text = tmp_stops1[,.SD[1],by = trip_number]$text_plot
-                        , clear_previous = T)
-rayshader::render_label(heightmap = elev_matrix
-                        ,lat = tmp_stops1[,.SD[.N],by = trip_number]$Y
-                        , long = tmp_stops1[,.SD[.N],by = trip_number]$X
-                        , altitude = tmp_stops1[,.SD[.N],by = trip_number]$new_scale_altitude
-                        , zscale = 100
-                        , textsize = 2.5
-                        , linewidth = 0
-                        , alpha = 0
-                        , adjustvec = -c(1.5,0.35)
-                        , extent = attr(elev_matrix, "extent")
-                        , fonttype = "standard"
-                        , text = tmp_stops1[,.SD[.N],by = trip_number]$text_plot
-                        , clear_previous = F)
+# Prepare the data for start labels (one row per trip)
+label_data_start <- tmp_stops1[, .SD[1], by = trip_number]
 
+for (i in 1:nrow(label_data_start)) {
+  rayshader::render_label(
+    heightmap = elev_matrix,
+    lat = label_data_start$Y[i],        
+    long = label_data_start$X[i],         
+    altitude = label_data_start$new_scale_altitude[i], 
+    zscale = 100,
+    textsize = 2.5,
+    alpha = 0,
+    adjustvec = c(2.5, 0),
+    extent = attr(elev_matrix, "extent"),
+    fonttype = "standard",
+    text = label_data_start$text_plot[i], 
+    clear_previous = ifelse(i == 1, TRUE, FALSE) 
+    )
+}
+
+# Prepare the data for end labels (one row per trip)
+label_data_end <- tmp_stops1[, .SD[.N], by = trip_number]
+
+for (i in 1:nrow(label_data_end)) {
+  rayshader::render_label(
+    heightmap = elev_matrix,
+    lat = label_data_end$Y[i],          
+    long = label_data_end$X[i],         
+    altitude = label_data_end$new_scale_altitude[i], 
+    zscale = 100,
+    textsize = 2.5,
+    alpha = 0,
+    adjustvec = -c(1.5, 0.35),
+    extent = attr(elev_matrix, "extent"),
+    fonttype = "standard",
+    text = label_data_end$text_plot[i],
+    clear_previous = FALSE
+    )
+}
 # 6) saving----
-dir.create("figures")
-rayshader::render_snapshot(filename = "figures/12_monday.png"
+
+rayshader::render_snapshot(filename = "figures/26_monday.png"
                            , width = 1000
                            , height = 2000)
