@@ -12,64 +12,37 @@ easypackages::packages('geobr'
                        , 'rayshader'
                        , 'progressr'
                        , 'pbapply'
-                       , 'aopdata')
+                       , 'cancensus'
+                       , 'sf'
+                       , 'dplyr')
 
+library('pbapply')
 
-# 1) GPS filter ------
+# GPS filter ------
 
 # read Toronto boundary
-spo_bound <- readr::read_rds("data/toronto_bound_CSD.rds")
+toronto_bound <- readr::read_rds("data/toronto_bound_CSD.rds")
 
-# emtu
-emtu_path <- "./data-raw/gtfs_spo_emtu_2019-06.zip"
-emtu_gtfs <- gtfstools::read_gtfs(path = emtu_path)
-emtu_gtfs <- gtfstools::filter_by_weekday(emtu_gtfs,"wednesday")
+# ttc
+ttc_path <- "data-raw/ttc_gtfs.zip"
+ttc_gtfs <- gtfstools::read_gtfs(path = ttc_path)
+ttc_gtfs <- gtfstools::filter_by_weekday(ttc_gtfs,"wednesday")
 
 # gtfs2gps 
 dir.create("data/gps/")
-dir.create("data/gps/emtu")
+dir.create("data/gps/ttc")
 
-progressr::with_progress(
-  gtfs2gps::gtfs2gps(gtfs_data = emtu_gtfs,
-                     parallel = TRUE,
-                     filepath = "data/gps/emtu/")
-)
-
-# sptrans
-sptr_path <- "./data-raw/gtfs_spo_sptrans_2019-06.zip"
-sptr_gtfs <- gtfstools::read_gtfs(sptr_path)
-sptr_gtfs <- gtfstools::frequencies_to_stop_times(sptr_gtfs)
-sptr_gtfs <- gtfstools::filter_by_weekday(sptr_gtfs,"wednesday")
-
-# gtfs2gps 
-dir.create("data/gps/sptrans")
-progressr::with_progress(
-  gtfs2gps::gtfs2gps(gtfs_data = sptr_gtfs,
-                     parallel = TRUE,
-                     filepath = "data/gps/sptrans/",
-                     continue = T
-  )
-)
+# progressr::with_progress(
+#   gtfs2gps::gtfs2gps(gtfs_data = ttc_gtfs,
+#                      parallel = FALSE,
+#                      filepath = "data/gps/ttc/")
+# )
 
 
+## TTC -----
 
-
-# 2) Rbind -----
-## sptrans-----
-sptrans_files <- list.files ("data/gps/sptrans/",full.names = TRUE)
-sptrans_stops <- pblapply(sptrans_files,function(i){
-  # i = sptrans_files[1]
-  tmp <- data.table::fread(i, select = c('shape_id','trip_id','stop_id',
-                                         'timestamp', 'dist',
-                                         'shape_pt_lat', 'shape_pt_lon'))
-  tmp <- tmp[!is.na(stop_id) & dist != 0]
-  return(tmp)
-  
-}) %>% data.table::rbindlist()
-
-## emtu -----
-emtu_files <- list.files ("data/gps/emtu/",full.names = TRUE)
-emtu_stops <- pblapply(emtu_files,function(i){
+ttc_files <- list.files ("data/gps/ttc/",full.names = TRUE)
+ttc_stops <- pbapply::pblapply(ttc_files,function(i){
   # i = emtu_files[1]
   tmp <- data.table::fread(i, select = c('shape_id','trip_id','stop_id',
                                          'timestamp', 'dist',
@@ -80,20 +53,16 @@ emtu_stops <- pblapply(emtu_files,function(i){
 }) %>% data.table::rbindlist()
 
 
-## Rbind GPS ----
-emtu_stops[,source := "EMTU"]
-sptrans_stops[,source := "SPTRANS"]
+all_stops <- ttc_stops
+all_stops[, stop_id := as.character(stop_id)]
 
-rbind_stops <- rbind(emtu_stops, sptrans_stops)
-rbind_stops[, stop_id := as.character(stop_id)]
-
-## Find bus stops inside SP -----
+## Find bus stops inside Toronto -----
 
 # total bus stop_ids 
-uniqueN(rbind_stops$stop_id) 
+uniqueN(all_stops$stop_id) 
 
 unique_stops_sf <- sfheaders::sf_multipoint(
-  obj = rbind_stops[,.SD[1],by = .(stop_id)]
+  obj = all_stops[,.SD[1],by = .(stop_id)]
   ,x = "shape_pt_lon"
   ,y = "shape_pt_lat"
   ,multipoint_id = "stop_id"
@@ -102,38 +71,39 @@ unique_stops_sf <- sfheaders::sf_multipoint(
 unique_stops_sf <- sf::st_set_crs(unique_stops_sf,4326)
 
 tmp_id <- sf::st_within(x = unique_stops_sf
-                        ,y = spo_bound
+                        ,y = toronto_bound
                         ,sparse = FALSE)
 
-# total stops inside SP
-sum(tmp_id) # 28878
+# total stops inside Toronto
+sum(tmp_id)
 
 unique_stops <- unique_stops_sf[which(tmp_id),]$stop_id
 unique_stops <- as.character(unique_stops)
 
 # apply filter
-rbind_stops_v1 <- rbind_stops[stop_id %in% unique_stops,]
+all_stops_filtered <- all_stops[stop_id %in% unique_stops,]
 
-readr::write_rds(rbind_stops_v1,"data/rbind_stops_sp.rds",compress = "gz")
+readr::write_rds(all_stops_filtered,"data/all_stops_toronto_filtered.rds",compress = "gz")
 
 # 2) Freq by time -----
 rm(list=ls())
 gc(reset = TRUE)
 
-rbind_stops <- readr::read_rds("data/rbind_stops_sp.rds")
+all_stops <- readr::read_rds("data/all_stops_toronto_filtered.rds")
 
 # adjust time
-rbind_stops[,time_to_sec := gtfstools:::cpp_time_to_seconds(timestamp)]
-rbind_stops[,minu_time := round(time_to_sec/60,1)]
-
+all_stops[,time_to_sec := gtfstools:::cpp_time_to_seconds(timestamp)]
+all_stops[,minu_time := round(time_to_sec/60,1)]
+all_stops[minu_time >= 1440, minu_time := 1439.9]
 
 ## add time classes ------
 # 60 min
+
 tp2 <- as.character(0:23)
 tp2[nchar(tp2) == 1] <- paste0("0",tp2[nchar(tp2) == 1])
 
 label_60min <- paste0(tp2,c(":00"))
-rbind_stops[, time_60min := cut(minu_time
+all_stops[, time_60min := cut(minu_time
                                 , breaks = seq(0,1440
                                                ,length.out = length(label_60min)+1)
                                 , right = FALSE
@@ -143,7 +113,7 @@ tp2 <- as.character(rep(0:23,each = 2))
 tp2[nchar(tp2) == 1] <- paste0("0",tp2[nchar(tp2) == 1])
 
 label_30min <- paste0(tp2,c(":00",":30"))
-rbind_stops[, time_30min := cut(minu_time
+all_stops[, time_30min := cut(minu_time
                                 , breaks = seq(0,1440
                                                ,length.out = length(label_30min)+1)
                                 , right = FALSE
@@ -153,7 +123,7 @@ tp2 <- as.character(rep(0:23,each = 4))
 tp2[nchar(tp2) == 1] <- paste0("0",tp2[nchar(tp2) == 1])
 
 label_15min <- paste0(tp2,c(":00",":15",":30",":45"))
-rbind_stops[, time_15min := cut(minu_time
+all_stops[, time_15min := cut(minu_time
                                 , breaks = seq(0,1440
                                                ,length.out = length(label_15min)+1)
                                 , right = FALSE
@@ -164,7 +134,7 @@ tp2 <- as.character(rep(0:23,each = 6))
 tp2[nchar(tp2) == 1] <- paste0("0",tp2[nchar(tp2) == 1])
 
 label_10min <- paste0(tp2,c(":00",":10",":20",":30",":40",":50"))
-rbind_stops[, time_10min := cut(minu_time
+all_stops[, time_10min := cut(minu_time
                                 , breaks = seq(0,1440
                                                ,length.out = length(label_10min)+1)
                                 , right = FALSE
@@ -177,7 +147,7 @@ tp2 <- as.character(rep(0:23,each = 12))
 tp2[nchar(tp2) == 1] <- paste0("0",tp2[nchar(tp2) == 1])
 label_05min <- paste0(tp2,":",tp1)
 
-rbind_stops[, time_05min := cut(minu_time
+all_stops[, time_05min := cut(minu_time
                                 , breaks = seq(0,1440
                                                ,length.out = length(label_05min)+1)
                                 , right = FALSE
@@ -188,107 +158,202 @@ rm(list = c("label_10min","label_15min","label_30min","label_60min"
 
 ## calcula freq ----
 
-rbind_stops[,N_60min := .N,by = .(stop_id,source,time_60min)]
-rbind_stops[,N_30min := .N,by = .(stop_id,source,time_30min)]
-rbind_stops[,N_15min := .N,by = .(stop_id,source,time_15min)]
-rbind_stops[,N_10min := .N,by = .(stop_id,source,time_10min)]
-rbind_stops[,N_05min := .N,by = .(stop_id,source,time_05min)]
+all_stops[,N_60min := .N,by = .(stop_id,time_60min)]
+all_stops[,N_30min := .N,by = .(stop_id,time_30min)]
+all_stops[,N_15min := .N,by = .(stop_id,time_15min)]
+all_stops[,N_10min := .N,by = .(stop_id,time_10min)]
+all_stops[,N_05min := .N,by = .(stop_id,time_05min)]
 
-rbind_stops <- data.table::melt.data.table(
-  data = rbind_stops
-  ,id.vars = c('stop_id','shape_pt_lat',  'shape_pt_lon','source')
+all_stops <- data.table::melt.data.table(
+  data = all_stops
+  ,id.vars = c('stop_id','shape_pt_lat',  'shape_pt_lon')
   ,measure.vars = list(
     "time" = c('time_60min','time_30min','time_15min', 'time_10min', 'time_05min')
     ,"N" = c('N_60min','N_30min','N_15min', 'N_10min', 'N_05min')
   ))
 
-rbind_stops[,time_interval := fcase(
+all_stops[,time_interval := fcase(
   variable == 1,"60 min",
   variable == 2,"30 min",
   variable == 3,"15 min",
   variable == 4,"10 min",
   variable == 5,"05 min"  )]
 
-#rbind_stops[,variable := NULL]
+#all_stops[,variable := NULL]
 
-rbind_stops[1]
-rbind_stops$time %>% unique() %>% sort()
+all_stops[1]
+all_stops$time %>% unique() %>% sort()
 
-# 3) stops to sf
+# stops to sf
 
-stops_sf <- sfheaders::sf_point(obj = rbind_stops[,.SD[1],by = .(stop_id)]
+stops_sf <- sfheaders::sf_point(obj = all_stops[,.SD[1],by = .(stop_id)]
                                 ,x = "shape_pt_lon"
                                 ,y = "shape_pt_lat"
                                 ,keep = TRUE)
 stops_sf <- sf::st_set_crs(stops_sf,4326)
 
-# find hexagons
-spo_hex <- aopdata::read_grid(city = "spo")
+# ----- Create Hexagonal Grid and Retrieve Census Data -----
 
-hex_id <- sf::st_within(x = stops_sf
-                        ,y = spo_hex
-                        ,sparse = TRUE
-) %>% as.numeric()
+# Project Toronto boundary and stops to UTM Zone 17N
 
-# add to stops_sf
-stops_sf$hex_id <- spo_hex$id_hex[hex_id]
+toronto_bound <- readr::read_rds("data/toronto_bound_CSD.rds")
+toronto_crs <- 26917
+toronto_bound_proj <- sf::st_transform(toronto_bound, toronto_crs)
+stops_sf_proj <- sf::st_transform(stops_sf, toronto_crs)
 
-setDT(stops_sf)
+# Target Area ~ 0.11 km^2 (similar to H3 level 9) = 110,000 m^2
+target_area_m2 <- 110000
+target_side_length <- sqrt(2 * target_area_m2 / (3 * sqrt(3))) # approx 205m
+target_cellsize <- sqrt(3) * target_side_length # approx 355m
 
-# combination of stop_id and hexagon
+# Create hexagonal grid
+# Use the bounding box of the projected boundary
+grid_poly <- sf::st_make_grid(toronto_bound_proj,
+                              cellsize = target_cellsize,
+                              what = "polygons",
+                              square = FALSE)
 
-stops_sf <- stops_sf[,.SD,.SDcols = c("stop_id","hex_id")]
+# Convert to sf object
+toronto_hex_grid_sf <- sf::st_sf(geometry = grid_poly)
 
+# Add a unique hex_id column
+toronto_hex_grid_sf$hex_id <- 1:nrow(toronto_hex_grid_sf)
 
-# 3) alocar info do hexagono ----
+# Assign CRS
+toronto_hex_grid_sf <- sf::st_set_crs(toronto_hex_grid_sf, toronto_crs)
 
-rbind_stops[stops_sf, on = "stop_id",hex_id := i.hex_id]
+# Clip the grid to the Toronto boundary
+toronto_hex_grid_proj <- sf::st_intersection(toronto_hex_grid_sf, toronto_bound_proj)
 
-# soma por hexagono
-rbind_stops <- rbind_stops[,list(N = sum(N)),by = .(hex_id,time,time_interval)]
+# Select only the hex_id and geometry after intersection
+toronto_hex_grid_proj <- select(toronto_hex_grid_proj, hex_id, geometry)
 
-
-# 4) aloca info de renda -----
-spo_renda <- aopdata::read_landuse(city = "spo")
-
-
-rbind_stops[spo_renda,on = c("hex_id" = "id_hex")
-            ,":="(
-              total_pop = P001
-              ,avg_inc = R001
-              ,quintil_inc = R002
-              ,decil_ind = R003
-            )]
-
-
-# 5) aloca geometria
-
-rbind_stops_sf <- data.table::merge.data.table(
-  x = setDT(spo_hex)
-  ,y = rbind_stops
-  ,by.x = "id_hex"
-  ,by.y = "hex_id"
+# Retrieve Census Data ---
+options(cancensus.cache_path = "data/cancensus_cache")
+census_dataset <- "CA21"
+toronto_da_data <- cancensus::get_census(
+  dataset = census_dataset,
+  regions = list(CSD = "3520005"), # Toronto CSD
+  level = "DA",
+  vectors = c("v_CA21_1","v_CA21_906"), # Population and Median Total Household Income
+  geo_format = "sf",
+  use_cache = TRUE
 )
-rbind_stops_sf <- sf::st_as_sf(rbind_stops_sf)
-rbind_stops_sf <- sf::st_set_crs(rbind_stops_sf,4326)
 
-readr::write_rds(x = rbind_stops_sf
-                 ,file = "data/hex_freq_sf.rds"
-                 ,compress = "gz")
+# Project DA data to the same CRS as hex grid
+toronto_da_data_proj <- sf::st_transform(toronto_da_data, toronto_crs)
+
+toronto_da_data_proj <- toronto_da_data_proj %>%
+  dplyr::rename(
+    Population2021 = `v_CA21_1: Population, 2021`,
+    MedianTotalIncome = `v_CA21_906: Median total income of household in 2020 ($)`
+  )
+
+# Calculate DA area
+toronto_da_data_proj$da_area <- sf::st_area(toronto_da_data_proj)
+
+# Apportion Census Data to Hex Grid ---
+
+# Ensure geometries are valid
+toronto_hex_grid_proj <- sf::st_make_valid(toronto_hex_grid_proj)
+toronto_da_data_proj <- sf::st_make_valid(toronto_da_data_proj)
+
+# Intersect hexagons and DAs
+intersection_sf <- sf::st_intersection(toronto_hex_grid_proj, toronto_da_data_proj)
+
+# Calculate area of each intersection polygon
+intersection_sf$intersection_area <- sf::st_area(intersection_sf)
+
+# Convert sf to data.table
+intersection_dt <- data.table::setDT(sf::st_drop_geometry(intersection_sf))
+
+# Calculate apportioned values per hexagon
+hex_apportioned_data <- intersection_dt[, .(
+  # Area-weighted income: sum(Income * intersection_area) / sum(intersection_area)
+  weighted_income = sum(MedianTotalIncome * intersection_area, na.rm = TRUE) / sum(intersection_area, na.rm = TRUE),
+  # Apportioned population: sum(Population_Density * intersection_area)
+  apportioned_pop = sum( (Population2021 / fifelse(da_area > units::set_units(0,"m^2"), units::drop_units(da_area), 1) ) * units::drop_units(intersection_area), na.rm = TRUE)
+), by = hex_id]
+
+# Handle potential NaNs if sum(intersection_area) was 0 for any hex
+hex_apportioned_data$weighted_income[is.nan(hex_apportioned_data$weighted_income)] <- 0 # Or NA
+hex_apportioned_data$apportioned_pop <- round(hex_apportioned_data$apportioned_pop) # Round population
+
+# Calculate Income Deciles ---
+# Decile breaks for v_CA21_906 (Median total household income) <- Need better method for calculating the breaks
+income_breaks <- c(-Inf, 60800, 72000, 81000, 89000, 96000, 102000, 111000, 125000, 153000, 700000)
+income_labels <- 1:10 # Deciles 1 (poorest) to 10 (richest)
+
+hex_apportioned_data[, income_decile := cut(weighted_income,
+                                            breaks = income_breaks,
+                                            labels = income_labels,
+                                            right = TRUE,
+                                            include.lowest = TRUE)]
+
+# Convert factor to numeric
+hex_apportioned_data$income_decile <- as.numeric(as.character(hex_apportioned_data$income_decile))
+# Assign NA to hexagons with no income data
+hex_apportioned_data$income_decile[is.na(hex_apportioned_data$weighted_income)] <- NA
+
+# Join apportioned data back to hex grid
+toronto_hex_grid_final_proj <- merge(toronto_hex_grid_proj, hex_apportioned_data, by = "hex_id", all.x = TRUE)
+
+# Transform final grid back to WGS84
+toronto_hex_grid_final_wgs84 <- sf::st_transform(toronto_hex_grid_final_proj, 4326)
 
 
+# Spatial Join Stops to Hexagons ---
+stops_with_hex <- sf::st_join(stops_sf_proj, toronto_hex_grid_final_proj, join = sf::st_within)
+
+# Select relevant columns (stop_id, hex_id, income_decile, apportioned_pop)
+stops_hex_lookup <- sf::st_drop_geometry(stops_with_hex) %>%
+  select(stop_id, hex_id, income_decile, apportioned_pop) %>%
+  data.table::setDT()
+
+# Allocate Hexagon Info to Stops Frequency Data ---
+# Merge hex_id from the lookup table into the frequency data
+all_stops[stops_hex_lookup, on = "stop_id", hex_id := i.hex_id]
+
+# Sum frequency (N) per hexagon, time interval, and time bin
+hex_freq_agg <- all_stops[!is.na(hex_id),
+                          list(N = sum(N, na.rm = TRUE)),
+                          by = .(hex_id, time, time_interval)]
+
+# --- Allocate Income/Population Info ----
+
+# Merge the aggregated frequency data with the hexagon data (income decile, population)
+hex_data_for_merge <- hex_apportioned_data[, .(hex_id, apportioned_pop, weighted_income, income_decile)]
+setnames(hex_data_for_merge, 
+         old = c("apportioned_pop", "weighted_income", "income_decile"),
+         new = c("total_pop", "avg_inc", "decil_ind"))
+
+final_hex_freq_data <- merge(hex_freq_agg, hex_data_for_merge, by = "hex_id", all.x = TRUE)
 
 
-# 4.1) values for article -----------------------------
+# --- Allocate Geometry ----
 
-rm(list=ls())
-gc(reset = TRUE)
+# Merge final data with hex grid geometry
+toronto_hex_freq_sf_proj <- merge(toronto_hex_grid_final_proj, final_hex_freq_data, by = "hex_id", all.x = TRUE)
 
-rbind_stops <- readr::read_rds("data/hex_freq_sf.rds")
-data.table::setDT(rbind_stops)
+# Convert back to WGS84
+toronto_hex_freq_sf <- sf::st_transform(toronto_hex_freq_sf_proj, 4326)
+
+# Save the final sf object
+
+readr::write_rds(x = toronto_hex_freq_sf,
+                 file = "data/toronto_hex_freq_sf.rds",
+                 compress = "gz")
+
+
+# --- Section 4.1) Adapt: Values for Article ---
+
+
+# Load the processed data
+toronto_hex_freq_sf <- readr::read_rds("data/toronto_hex_freq_sf.rds")
+data.table::setDT(toronto_hex_freq_sf) # Convert sf to data.table for faster processing
 
 # check hexagons in morning peak by income group
-tmp <- rbind_stops[time_interval == "60 min",] %>% 
+tmp <- toronto_hex_freq_sf[time_interval == "60 min",] %>% 
   .[time %in% c("06:00","07:00","08:00"),peak := "Morning"] %>% 
   .[!is.na(peak),] %>% 
   .[,decil_class := fcase(decil_ind %in% 9:10,"20p_richest"
@@ -305,11 +370,11 @@ tmp[decil_class == '20p_richest']$vehicles_by_hex / tmp[decil_class == '50p_poor
 #> 4839.267 / 3225.112 = 1.500496
 
 # check mean in morning peak by income group
-tmp <- rbind_stops[time_interval == "05 min",] %>% 
+tmp <- toronto_hex_freq_sf[time_interval == "05 min",] %>% 
   .[time %in% c("06:00","07:00","08:00"),peak := "Morning"] %>% 
   .[!is.na(peak),] %>% 
-  .[,hour :=  stringr::str_split(time,":",n = 2,simplify = TRUE)[1],by = .(id_hex,time)] %>% 
-  .[,minute :=  stringr::str_split(time,":",n = 2,simplify = TRUE)[2],by = .(id_hex,time)] %>% 
+  .[,hour :=  stringr::str_split(time,":",n = 2,simplify = TRUE)[1],by = .(hex_id,time)] %>% 
+  .[,minute :=  stringr::str_split(time,":",n = 2,simplify = TRUE)[2],by = .(hex_id,time)] %>% 
   .[,time_minute := as.numeric(hour) * 60 + as.numeric(minute)] %>% 
   .[,decil_class := fcase(decil_ind %in% 9:10,"20p_richest"
                           , decil_ind %in% 1:5,"50p_poorest")] %>% 
@@ -322,23 +387,27 @@ tmp[,minute := (V1 - hour*60)]
 tmp[,time := paste0(hour,":",round(minute,0))]
 tmp[]
 
-tmp[decil_class == '20p_richest']$vehicles_by_hex / tmp[decil_class == '50p_poorest']$vehicles_by_hex 
+tmp[decil_class == '20p_richest']$vehicles_by_hex / tmp[decil_class == '50p_poorest']$vehicles_by_hex
 
 
-# 5) Plots ----
-rm(list=ls())
-gc(reset = TRUE)
 
-rbind_stops <- readr::read_rds("data/hex_freq_sf.rds")
-data.table::setDT(rbind_stops)
+# --- Section 5) Adapt: Plots ----
+library(ggplot2)
+library(rayshader)
 
+# Load data again
+toronto_hex_freq_sf <- readr::read_rds("data/toronto_hex_freq_sf.rds")
+data.table::setDT(toronto_hex_freq_sf) # Convert to data.table
+
+# Check if total_pop exists, handle NAs
+toronto_hex_freq_sf <- toronto_hex_freq_sf[!is.na(total_pop) & total_pop > 0 & !is.na(decil_ind)]
 
 # save tmp data
-vec <- unique(rbind_stops$time_interval)
+vec <- unique(toronto_hex_freq_sf$time_interval)
 
 list_plots <- lapply(seq_along(vec),function(i){ # i = 4
   
-  tmp <- rbind_stops[total_pop > 0 &
+  tmp <- toronto_hex_freq_sf[total_pop > 0 &
                        time_interval == vec[i] & 
                        !is.na(time ),] %>% 
     .[,weighted.mean(N,total_pop),by = .(time,decil_ind )]   # depois
@@ -351,7 +420,7 @@ list_plots <- lapply(seq_along(vec),function(i){ # i = 4
     scale_x_discrete(breaks = fixed_time,labels = fixed_time)+
     labs(title = vec[i]
          ,x = NULL
-         ,y = "Decil de renda"
+         ,y = "Income Decile"
          , fill = "Frequency of \nbus stops")+
     viridis::scale_fill_viridis()+
     theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1))
@@ -370,7 +439,7 @@ list_plots[[4]]
 # rayshader ----
 future::plan("multisession", workers = 19)
 
-tmp <- rbind_stops[total_pop > 0 &
+tmp <- toronto_hex_freq_sf[total_pop > 0 &
                      time_interval == "10 min" & 
                      !is.na(time ),] %>% 
   .[,weighted.mean(N,total_pop),by = .(time,decil_ind )]   # depois
@@ -394,7 +463,7 @@ plot <- ggplot(tmp)+
 plot
 
 ggplot2::ggsave(plot
-                ,filename = "figures/10min_freq_2d.png"
+                ,filename = "figures/10min_freq_2d_SundayFix.png"
                 ,width = 10
                 ,height = 8
                 ,dpi = 300
@@ -412,7 +481,7 @@ rayshader::plot_gg(ggobj = plot
 
 # find angle view
 # rayshader::render_camera(theta = NULL,phi = NULL,zoom = NULL,fov = NULL)
-rayshader::render_snapshot(filename = "figures/10min_freq_3d_rayshader.png"
+rayshader::render_snapshot(filename = "figures/10min_freq_3d_rayshader_sundayfix.png"
                            ,width = 1000
                            ,height = 1000
 )
