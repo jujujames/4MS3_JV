@@ -36,7 +36,7 @@ toronto_das <- cancensus::get_census(
   dataset = census_dataset,
   regions = list(CSD = "3520005"),
   level = "DA",
-  vectors = c("v_CA21_1","v_CA21_6","v_CA21_7","v_CA21_906"),
+  vectors = c("v_CA21_1","v_CA21_6","v_CA21_7","v_CA21_906","v_CA21_1100","v_CA21_1121"),
   geo_format = "sf",
   use_cache = TRUE
 )
