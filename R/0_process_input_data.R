@@ -1,4 +1,4 @@
-# prepare data
+# prepare data for time geography analysis
 # load libraries
 
 rm(list=ls())
@@ -10,9 +10,11 @@ easypackages::packages('geobr', 'magick', 'gtfs2gps',
                        'ggplot2', 'ggmap', 'raster', 'terra',
                        'rayshader', 'rayrender', 'rayimage', 'cancensus')
 
+
 # 1) Retrieve Toronto's Census Subdivision Boundary ------
 
 # Visit https://censusmapper.ca/api to obtain an API key for the cancensus package
+
 # options(cancensus.api_key = "api key")
 
 
@@ -28,10 +30,12 @@ toronto_bound <- sf::st_transform(toronto_bound, 4326)
 
 readr::write_rds(toronto_bound, "data/toronto_bound_CSD.rds")
 
+
 # 2) Retrieve GTFS DATA FOR SPATIAL PLOTS ------
 
 # ttc_gtfs_url <- "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/7795b45e-e65a-4465-81fc-c36b9dfff169/resource/cfb6b2b8-6191-41e3-bda1-b175c51148cb/download/TTC%20Routes%20and%20Schedules%20Data.zip"
 # download.file(url = ttc_gtfs_url, destfile = "data-raw/ttc_gtfs.zip")
+
 
 # 3) Adjust TTC GTFS -----
 
