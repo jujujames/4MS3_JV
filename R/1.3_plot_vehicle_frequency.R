@@ -221,7 +221,7 @@ toronto_hex_grid_sf <- sf::st_set_crs(toronto_hex_grid_sf, toronto_crs)
 toronto_hex_grid_proj <- sf::st_intersection(toronto_hex_grid_sf, toronto_bound_proj)
 
 # Select only the hex_id and geometry after intersection
-toronto_hex_grid_proj <- select(toronto_hex_grid_proj, hex_id, geometry)
+toronto_hex_grid_proj <- dplyr::select(toronto_hex_grid_proj, hex_id, geometry)
 
 # Retrieve Census Data ----
 options(cancensus.cache_path = "data/cancensus_cache")
