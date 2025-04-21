@@ -65,7 +65,7 @@ view_tmp_stops <- data.table::copy(tmp_stops) %>%
                            , multipoint_id = "shape_id") %>%
   sf::st_set_crs(4326) %>%
   sf::st_transform(32617) %>%
-  mapview()
+  mapview::mapview()
 
 
 # Create line
@@ -99,7 +99,7 @@ osm_bbox = tmp_gps_bbox %>%
   .[c(1,3,2,4)]
 
 view_osm_bbox <- sf::st_bbox(tmp_gps_bbox) %>% 
-  mapview()
+  mapview::mapview()
 
 view_osm_bbox
 # read tile -----
