@@ -3,7 +3,7 @@
 rm(list=ls())
 gc(reset = TRUE)
 
-install.packages('easypackages')
+#install.packages('easypackages')
 easypackages::packages(, 'gtfs2gps'
                        , 'data.table'
                        , 'magrittr'
@@ -14,6 +14,19 @@ easypackages::packages(, 'gtfs2gps'
                        , 'cancensus'
                        , 'sf'
                        , 'dplyr')
+
+# Load packages ----
+
+library(gtfs2gps)
+library(data.table)
+library(magrittr)
+library(ggplot2)
+library(rayshader)
+library(progressr)
+library(pbapply)
+library(cancensus)
+library(sf)
+library(dplyr)
 
 # GPS filter ----
 

@@ -1,0 +1,1030 @@
+---
+title: "Transit Service Equity Analysis"
+author: "Julian Vella"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    self-contained: true
+    code-fold: true
+params:
+  city_name: "toronto"
+  csd_code: "3520005"
+  gtfs_file: "ttc_gtfs.zip"
+  ghs_built_c_file: "GHS_BUILT_C_FUN_E2018_GLOBE_R2023A_54009_10_V1_0_R4_C12.tif"
+  wgs84_utm_code: "32617"
+  census_dataset: "CA21"
+  analysis_day: "wednesday"
+execute:
+  echo: true
+  warning: false
+---
+
+# Introduction
+
+This Quarto document provides a reproducible workflow for analyzing public transit service equity in a Canadian city. The primary goal is to investigate how the level of public transit service, measured by frequency, varies across different income groups and throughout a typical weekday.
+
+The methodology is adapted from the 2022 paper *Exploring the Time Geography of Public Transport Networks with the gtfs2gps package* by Pereira, R.H.M., Andrade, P.R. & Vieira, J.P.B.
+
+The analysis culminates in two key visualizations:
+
+-   A 2D plot illustrating the average transit service frequency for each income decile across 10-minute intervals over a 24-hour period.
+-   A 3D representation of the same plot, offering a more intuitive grasp of the peaks and valleys in service provision.
+
+By parameterizing inputs such as the city name, census codes, and data files, this document is designed to be a flexible tool for anyone interested in conducting similar equity analyses across Canada.
+
+# Setup and Configuration
+
+This section handles all the initial setup required for the analysis. It configures directories, validates input files, sets up the necessary Java environment for the routing engine, and loads all required R packages.
+
+## Directory Setup
+
+```{r}
+#| label: setup-directories
+
+library(here)
+library(fs)
+
+# Define city specific paths
+city_prefix <- params$city_name
+city_basedir <- here::here(city_prefix)
+dir_city_data <- fs::path(city_basedir, "data")
+dir_city_figures <- fs::path(city_basedir, "figures")
+dir_raw_data <- here::here("data-raw")
+gtfs_raw <- fs::path(dir_raw_data, params$gtfs_file)
+ghs_built_c_raw <- fs::path(dir_raw_data, params$ghs_built_c_file)
+dir_census_cache <- fs::path(dir_city_data, "cancensus_cache")
+dir_gps <- fs::path(dir_city_data, "gps")
+
+# Create directories
+fs::dir_create(city_basedir)
+fs::dir_create(dir_city_data)
+fs::dir_create(dir_city_figures)
+fs::dir_create(dir_census_cache)
+fs::dir_create(dir_raw_data)
+fs::dir_create(dir_gps)
+```
+
+## Configure Cancensus API Key and Cache
+
+Visit <https://censusmapper.ca/api> to obtain an API key for the cancensus package. Ensure `CM_API_KEY` is set in your `.Renviron` or system environment.
+
+```{r}
+#| label: setup-api-key
+
+census_api_key_env <- Sys.getenv("CM_API_KEY")
+options(cancensus.api_key = census_api_key_env)
+
+# Configure cancensus cache path
+options(cancensus.cache_path = dir_census_cache)
+```
+
+## Validate Input Files
+
+Both of the following files should be downloaded to the `data-raw` directory.
+
+**GTFS**: Visit your chosen city's open data portal or transit agency's website to download the General Transit Feed Specification for your chosen study area.
+
+**GHS-BUILT-C**: Visit <https://human-settlement.emergency.copernicus.eu/download.php?ds=builtC> to download the GHS-BUILT-C spatial raster for the chosen study area. This raster delineates the boundaries of human settlements at a 10m resolution, and is later used to more accurately model the spatial distribution of the study population.
+
+```{r}
+#| label: setup-validate-files
+
+# Validate GTFS file
+if (!fs::file_exists(gtfs_raw)) {
+  stop(
+    "GTFS file not found at: ", gtfs_raw, "\n",
+    "Ensure the file '", params$gtfs_file, "' exists in the '", dir_raw_data, "' directory."
+  )
+} else {
+  message("GTFS file located: ", gtfs_raw)
+}
+
+# Validate GHS_BUILT_C raster file
+if (!fs::file_exists(ghs_built_c_raw)) {
+  stop(
+    "GHS-BUILT-C raster file not found at: ", ghs_built_c_raw, "\n",
+    "Ensure the file '", params$ghs_built_c_file, "' exists in the '", dir_raw_data, "' directory."
+  )
+} else {
+  message("GHS-BUILT-C raster file located: ", ghs_built_c_raw)
+}
+```
+
+## Install and Setup Java Environment for r5r
+
+The `r5r` package requires Java Development Kit (JDK) 21. The `rJavaEnv` package provides a way to install it from within R.
+
+```{r}
+#| label: setup-java
+
+if (!require("rJavaEnv")) install.packages("rJavaEnv")
+
+# java_quick_install() will ensure the specified version of Java is available.
+rJavaEnv::java_quick_install(version = 21)
+
+# Verify the installation by checking which Java version rJava will use.
+rJavaEnv::java_check_version_rjava()
+
+# Set Java memory BEFORE loading r5r.
+# The default is 512MB. Adjust "12" based on your system's available RAM.
+options(java.parameters = "-Xmx12G")
+```
+
+## Load Packages
+
+```{r}
+#| label: setup-load-packages
+
+# Data manipulation and spatial data
+library(data.table)
+library(sf)            
+library(sfheaders)     
+library(dplyr)         
+library(terra)
+library(raster)
+
+# GTFS processing
+library(gtfstools)     
+library(gtfs2gps)      
+
+# R5R processing
+library(r5r)
+library(osmextract)
+
+# Census data
+library(cancensus)    
+
+# Utilities
+library(pbapply)     
+library(stringr)     
+library(readr)
+library(progressr)
+library(rJavaEnv)
+
+# Plotting and Visualization
+library(ggplot2)       
+library(viridis)     
+library(patchwork)    
+library(rayshader) 
+library(mapview)
+
+# Parallel Computing
+library(future)
+library(doParallel)
+```
+
+# Data Acquisition and Initial Processing
+
+This section loads the primary datasets required for the analysis. We will acquire the administrative boundary for the specified city, the GTFS data, the GHS-BUILT-C raster, and the OpenStreetMap (OSM) network.
+
+## Study Area Definition
+
+First, we retrieve the Census Subdivision (CSD) boundary for the city defined in the parameters. This boundary will serve as the spatial extent for our analysis.
+
+```{r}
+#| label: get-city-boundary
+#| cache: true
+
+city_bound_sf <- cancensus::get_census(
+  dataset = params$census_dataset,
+  regions = list(CSD = params$csd_code),
+  level = "CSD",
+  geo_format = "sf",
+  use_cache = TRUE 
+)
+
+# Transform to WGS84 coordinate system (EPSG:4326)
+city_bound_sf <- sf::st_transform(city_bound_sf, 4326)
+
+# Define the path for saving the boundary data
+path_city_bound_rds <- fs::path(dir_city_data, paste0(city_prefix, "_bound_CSD.rds"))
+
+# Save the boundary data to the city-specific processed data folder
+readr::write_rds(city_bound_sf, path_city_bound_rds)
+```
+
+**Visualize Study Area** A map is generated below to confirm that the correct boundary has been retrieved.
+
+```{r}
+#| label: map-city-boundary
+#| echo: false
+
+mapview::mapview(city_bound_sf, layer.name = "City Boundary")
+```
+
+## Transit Data (GTFS)
+
+Next, we load the GTFS file for the city's transit agency and filter it to include only the services running on the specific day of the week chosen for the analysis (e.g., 'wednesday').
+
+```{r}
+#| label: load-gtfs
+
+# Load GTFS Data
+city_gtfs <- gtfstools::read_gtfs(path = gtfs_raw)
+
+# Filter GTFS by the specified analysis day
+city_gtfs_filtered <- gtfstools::filter_by_weekday(city_gtfs, weekday = params$analysis_day)
+```
+
+## Built-Up Area Data (GHS-BUILT-C)
+
+We load the GHS-BUILT-C raster file, which is a dataset that identifies built-up areas. We will later use this to distinguish residential areas from non-residential ones (e.g., industrial areas, parks).
+
+```{r}
+#| label: load-ghs-raster
+
+# Load Raster Data
+ghs_raster <- terra::rast(ghs_built_c_raw)
+```
+
+## Street Network Data (OSM)
+
+Finally, we download the OpenStreetMap street network data for the region containing our city. This file will be used by the r5r routing engine to calculate walking times from residential areas to transit stops.
+
+```{r}
+#| eval: false
+#| label: get-osm-data
+
+path_pbf_full <- fs::path(dir_raw_data, paste0(params$city_name, "_full.osm.pbf"))
+
+# Download the full regional street network data if it doesn't already exist.
+if (!fs::file_exists(path_pbf_full)) {
+  message("Regional street network file not found. Downloading...")
+  osmextract::oe_get(
+    city_bound_sf,
+    provider = "geofabrik",
+    quiet = FALSE,
+    download_only = TRUE,
+    download_directory = dir_raw_data,
+    filename = paste0(params$city_name, "_full.osm.pbf")
+  )
+}
+```
+
+# Building the Analytical Datasets
+
+With the raw data loaded, this section details the steps required to process and integrate these sources into a final, unified dataset for analysis.
+
+## Creating a Uniform Analysis Grid
+
+To analyze spatial patterns of population, income, and transit service, we will create a grid that covers the entire city boundary. This grid will become the fundamental unit of our analysis.
+
+```{r}
+#| label: create-hex-grid
+#| cache: true
+
+# Set the projected CRS from parameters for accurate distance calculations in meters
+projected_crs <- as.numeric(params$wgs84_utm_code)
+
+# Project the city boundary to the specified UTM zone
+city_bound_proj <- sf::st_transform(city_bound_sf, projected_crs)
+
+# Define target area for each hexagon, similar to H3 level 9 (~0.11 km^2) 
+target_area_m2 <- 110000 
+# Calculate the required cell size for st_make_grid based on the target area
+target_cellsize <- sqrt(2 * target_area_m2 / (3 * sqrt(3))) * sqrt(3)
+
+# Create a hexagonal grid covering the bounding box of the projected city boundary 
+grid_poly <- sf::st_make_grid(
+  city_bound_proj,
+  cellsize = target_cellsize,
+  what = "polygons",
+  square = FALSE
+)
+
+# Convert the grid to an sf object and add a unique ID for each hexagon 
+city_hex_grid_sf <- sf::st_sf(hex_id = 1:length(grid_poly), geometry = grid_poly)
+city_hex_grid_sf <- sf::st_set_crs(city_hex_grid_sf, projected_crs)
+
+# Clip the grid to the precise city boundary 
+city_hex_grid_proj <- sf::st_intersection(city_hex_grid_sf, city_bound_proj)
+
+# Select only the hex_id and geometry
+city_hex_grid_proj <- dplyr::select(city_hex_grid_proj, hex_id, geometry)
+```
+
+## Identifying Residential Areas
+
+Not all land within a city is residential. To improve the accuracy of our analysis, we need to distinguish populated residential lands from industrial areas, parks, airports, and other non-residential zones. By doing so, we ensure that when we later add census data, we are allocating population and income information only to the areas where people actually live.
+
+This process involves using the GHS-BUILT-C raster as a filter on the Census Dissemination Area (DA) polygons.
+
+```{r}
+#| label: process-residential-areas
+#| cache: true
+
+# 1. Load Dissemination Area (DA) Boundaries
+# Retrieve DA geometries for the city and project them to the local UTM CRS.
+city_da_sf <- cancensus::get_census(
+  dataset = params$census_dataset,
+  regions = list(CSD = params$csd_code),
+  level = "DA",
+  geo_format = "sf",
+  use_cache = TRUE
+)
+city_da_proj <- sf::st_transform(city_da_sf, crs = projected_crs)
+
+
+# 2. Align GHS Raster with Local CRS
+# Temporarily reproject DA boundaries to match the GHS raster's CRS (Mollweide)
+city_da_mollweide <- sf::st_transform(city_da_proj, sf::st_crs(ghs_raster))
+# Crop the global raster to the extent of the city
+ghs_raster_cropped <- terra::crop(ghs_raster, city_da_mollweide, snap = "out")
+# Project the cropped raster to our local UTM CRS using nearest neighbor resampling
+ghs_raster_proj <- terra::project(ghs_raster_cropped, y = terra::crs(city_da_proj), method = "near")
+
+
+# 3. Filter and Vectorize Residential Polygons
+# This process isolates the residential parts of each DA.
+# Create a boolean mask where residential cells (value == 1) are TRUE.
+ghs_residential_mask <- ghs_raster_proj == 1
+ghs_residential_mask[ghs_residential_mask == 0] <- NA # Set non-residential to NA
+
+# Rasterize the DA polygons, using the unique GeoUID as the cell value.
+da_id_raster <- terra::rasterize(
+  x = city_da_proj,
+  y = ghs_residential_mask,
+  field = "GeoUID",
+  touches = TRUE
+)
+
+# Use the residential mask to filter the DA ID raster. Only cells that are
+# residential will retain their DA GeoUID.
+final_raster_to_vectorize <- terra::mask(da_id_raster, ghs_residential_mask)
+
+# Vectorize the result back into polygons. 'dissolve = TRUE' groups all cells
+# with the same GeoUID into a single multipolygon for that DA.
+residential_polygons_sf <- terra::as.polygons(
+  final_raster_to_vectorize,
+  dissolve = TRUE,
+  na.rm = TRUE
+) %>%
+  sf::st_as_sf() %>%
+  dplyr::rename(GeoUID = 1) # Rename the ID column
+
+# Join the original attributes from the DA data frame back to the new polygons
+da_attributes <- sf::st_drop_geometry(city_da_proj)
+residential_polygons_sf <- dplyr::left_join(residential_polygons_sf, da_attributes, by = "GeoUID")
+
+# Clean up large intermediate objects to free memory
+rm(ghs_raster, ghs_raster_proj, ghs_residential_mask, da_id_raster, 
+   final_raster_to_vectorize, da_attributes, city_da_mollweide, ghs_raster_cropped)
+gc()
+```
+
+**Visualize Residential Area Filtering** To make the result of this spatial filtering clear, the map below overlays the new, smaller residential-only polygons (in red) on top of their original, larger Dissemination Area boundaries (in grey).
+
+```{r}
+#| label: map-residential-areas
+#| echo: false
+
+mapview::mapview(
+  city_da_proj,
+  col.regions = "grey",
+  alpha.regions = 0.3,
+  layer.name = "Original DAs"
+) + mapview::mapview(
+  residential_polygons_sf,
+  col.regions = "red",
+  layer.name = "Filtered Residential Areas"
+)
+```
+
+## Apportioning Census Data
+
+With our analysis grid and residential footprints defined, we can now incorporate census data. The goal is to estimate the population and median income for each hexagon. We cannot simply join the census data, as the census boundaries (DAs) do not align with our grid. Instead, we use the residential polygons as a guide to apportion the population and income data from the DAs to the hexagons they overlap with.
+
+This code block performs three key operations:
+
+**1. Retrieve Census Data:** Retrieves population and median household income at the Dissemination Area (DA) level from the Canadian Census of Population.
+
+**2. Apportion Data to Hexagons:** Intersects the residential DA polygons with the hex grid. It then calculates a population for each hexagon based on residential density and an area-weighted median income. This is more accurate than assuming population is spread evenly across a whole DA.
+
+**3. Create Population-Weighted Income Deciles:** Create deciles where each group contains a roughly equal share (10%) of the city's total population.
+
+```{r}
+#| label: apportion-census-data
+#| cache: true
+
+# 1. Retrieve Census Data at the DA level
+census_vectors <- c(
+  population = "v_CA21_1", # Population, 2021
+  median_hh_income = "v_CA21_906" # Median total income of household in 2020 ($)
+)
+
+census_data <- cancensus::get_census(
+  dataset = params$census_dataset,
+  regions = list(CSD = params$csd_code),
+  level = "DA",
+  vectors = census_vectors,
+  geo_format = NA, # Retrieve as a non-spatial table
+  use_cache = TRUE
+)
+
+# Join census data to our residential-only polygons
+residential_polygons_sf <- dplyr::left_join(
+  residential_polygons_sf,
+  census_data %>% dplyr::select(GeoUID, population, median_hh_income),
+  by = "GeoUID"
+)
+
+# Calculate the area of each residential polygon
+residential_polygons_sf$res_poly_area <- sf::st_area(residential_polygons_sf)
+
+# 2. Apportion Data from Residential Polygons to Hexagonal Grid
+# Ensure geometries are valid before intersection
+residential_polygons_sf <- sf::st_make_valid(residential_polygons_sf)
+city_hex_grid_proj <- sf::st_make_valid(city_hex_grid_proj)
+
+# Intersect the residential polygons with the hexagonal grid
+intersection_sf <- sf::st_intersection(city_hex_grid_proj, residential_polygons_sf)
+
+# Calculate the area of each resulting intersection fragment
+intersection_sf$intersection_area <- sf::st_area(intersection_sf)
+
+# Convert to data.table for aggregation
+intersection_dt <- data.table::setDT(sf::st_drop_geometry(intersection_sf))
+
+# Calculate apportioned values for each hexagon
+hex_apportioned_dt <- intersection_dt[, .(
+  apportioned_pop = sum(
+    (population / fifelse(res_poly_area > units::set_units(0, "m^2"), units::drop_units(res_poly_area), 1)) * units::drop_units(intersection_area),
+    na.rm = TRUE
+  ),
+  weighted_income = sum(median_hh_income * units::drop_units(intersection_area), na.rm = TRUE) / sum(units::drop_units(intersection_area), na.rm = TRUE)
+), by = hex_id]
+
+# Clean up results
+hex_apportioned_dt[is.nan(weighted_income), weighted_income := NA]
+hex_apportioned_dt[, apportioned_pop := round(apportioned_pop)]
+
+# 3. Create Population-Weighted Income Deciles
+# This ensures each decile represents ~10% of the total population
+data.table::setDT(hex_apportioned_dt)
+hex_data_for_deciles <- hex_apportioned_dt[!is.na(weighted_income) & apportioned_pop > 0, ]
+
+# Sort hexagons by income to calculate cumulative population
+setorder(hex_data_for_deciles, weighted_income)
+
+# Calculate cumulative population percentage
+total_study_pop <- sum(hex_data_for_deciles$apportioned_pop, na.rm = TRUE)
+hex_data_for_deciles[, cum_pop := cumsum(apportioned_pop)]
+hex_data_for_deciles[, cum_pop_pct := cum_pop / total_study_pop]
+
+# Assign decile based on the cumulative population percentage
+hex_data_for_deciles[, income_decile := floor(cum_pop_pct * 10 - 1e-9) + 1]
+
+# Merge the new deciles back into the main hex grid object
+decile_data_to_merge <- hex_data_for_deciles[, .(hex_id, income_decile)]
+hex_apportioned_dt <- merge(hex_apportioned_dt, decile_data_to_merge, by = "hex_id", all.x = TRUE)
+
+# Join the final apportioned census data back to the main hexagonal grid sf object
+city_hex_grid_final <- merge(city_hex_grid_proj, hex_apportioned_dt, by = "hex_id", all.x = TRUE)
+
+# Print a verification table to check the population distribution across deciles
+setDT(city_hex_grid_final)
+
+decile_pop_verification <- city_hex_grid_final[, .(
+  decile_pop = sum(apportioned_pop, na.rm = TRUE)
+  ), by = income_decile][!is.na(income_decile)]
+decile_pop_verification[, pop_percentage := round(100 * decile_pop / sum(decile_pop), 2)]
+message("Population distribution across income deciles:")
+print(decile_pop_verification[order(income_decile)])
+
+# Convert back to sf object
+city_hex_grid_final <- st_as_sf(
+  city_hex_grid_final, 
+  sf_column_name = "geometry",
+  crs = params$wgs84_utm_code
+)
+
+# Clean up intermediate objects to free up memory
+rm(census_data, residential_polygons_sf, intersection_sf, intersection_dt, 
+   hex_apportioned_dt, hex_data_for_deciles, decile_data_to_merge, decile_pop_verification)
+gc()
+```
+
+### Visualize Apportioned Census Data {.panel-tabset}
+
+The following maps allow us to visually inspect the results of the apportionment. We can see the spatial distribution of the estimated population and the resulting income deciles across the city.
+
+#### Population
+
+```{r}
+#| echo: false
+#| label: map-hex-population
+#| fig-cap: "Estimated Population per Hexagon"
+
+# Plot for Apportioned Population
+pop_plot <- ggplot(city_hex_grid_final) +
+  geom_sf(aes(fill = apportioned_pop), color = NA) +
+  scale_fill_viridis_c(name = "Population", option = "magma", na.value = "grey80") +
+  labs(title = "Estimated Population per Hexagon") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "bottom")
+
+print(pop_plot)
+
+path_pop_plot <- fs::path(dir_city_figures, paste0(city_prefix, "_population_map.png"))
+
+# Save the plot
+ggplot2::ggsave(
+  filename = path_pop_plot,
+  plot = pop_plot,
+  width = 8,
+  height = 8,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+#### Income Decile
+
+```{r}
+#| echo: false
+#| label: map-hex-income
+#| fig-cap: "Population-Weighted Income Decile per Hexagon"
+
+# Plot for Income Deciles
+income_plot <- ggplot(city_hex_grid_final) +
+  geom_sf(aes(fill = as.factor(income_decile)), color = NA) +
+  scale_fill_viridis_d(name = "Income Decile", option = "viridis", na.value = "grey80") +
+  labs(title = "Population-Weighted Income Decile") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "bottom")
+
+print(income_plot)
+
+path_income_plot <- fs::path(dir_city_figures, paste0(city_prefix, "_income_decile_map.png"))
+
+# Save the plot
+ggplot2::ggsave(
+  filename = path_income_plot,
+  plot = income_plot,
+  width = 8,
+  height = 8,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+## Calculating Transit Service Frequency
+
+The goal of this section is to calculate our primary metric of transit service: the frequency of vehicles arriving at each stop within the city. High frequency is a key indicator of high-quality, convenient transit service.
+
+### Convert GTFS to GPS-like Records
+
+The `gtfs2gps()` function interpolates the space-time position of each vehicle for every trip, creating a detailed dataset akin to GPS records. This is the most computationally intensive step of the analysis.
+
+```{r}
+#| label: run-gtfs2gps
+#| eval: false
+#| cache: true
+
+# Convert the filtered GTFS data to GPS format. This function writes one file per
+# trip to the specified directory. with_progress() shows a progress bar.
+progressr::with_progress(
+  gtfs2gps::gtfs2gps(
+    gtfs_data = city_gtfs_filtered,
+    filepath = dir_gps
+  )
+)
+```
+
+```{r}
+#| label: check-gtfs2gps
+list_gps_files <- list.files(dir_gps, full.names = TRUE)
+message("Number of GPS files created: ", length(list_gps_files))
+```
+
+### Calculate Stop Frequencies in Time Bins
+
+With the GPS-like data generated, we can now calculate service frequencies. We perform the following steps:
+
+**1. Read and Combine Stop Events**: Load and merge all the individual trip files.
+
+**2. Filter Stops**: Keep only the stops that are physically located within our city's boundary.
+
+**3. Create Time Bins**: Group the 24-hour day into discrete time intervals (e.g., every 5, 10, 15 minutes). This allows us to analyze how frequency changes over time.
+
+**4. Calculate Frequency**: Count the number of stop events (.N) for each stop within each time bin.
+
+**5. Reshape Data**: Combine the results into a single "long" format data table for easier use later.
+
+```{r}
+#| label: calculate-frequencies
+#| cache: true
+
+# 1. Read and Combine Stop Events
+city_gps_files <- list.files(dir_gps, full.names = TRUE)
+city_stops_raw <- pbapply::pblapply(city_gps_files, data.table::fread,
+  select = c('shape_id', 'trip_id', 'stop_id', 'timestamp', 'dist', 'shape_pt_lat', 'shape_pt_lon')
+) %>% data.table::rbindlist(fill = TRUE)
+
+# Filter for actual stop events (where stop_id is present)
+city_stops_raw <- city_stops_raw[!is.na(stop_id)]
+city_stops_raw[, stop_id := as.character(stop_id)]
+
+# 2. Filter Stops to City Boundary
+# Create an sf object of unique stop locations for spatial filtering
+unique_stops_sf <- city_stops_raw[, .SD[1], by = stop_id] %>%
+  sfheaders::sf_point(x = "shape_pt_lon", y = "shape_pt_lat", keep = TRUE) %>%
+  sf::st_set_crs(4326)
+
+# Perform a spatial join to find stops that are within the city boundary
+stops_inside_city_sf <- sf::st_filter(unique_stops_sf, city_bound_sf, .predicate = sf::st_within)
+ids_stops_inside_city <- stops_inside_city_sf$stop_id
+
+# Filter the main data table to keep only stops inside the city
+city_stops_filtered <- city_stops_raw[stop_id %in% ids_stops_inside_city, ]
+
+# 3. Create Time Bins
+# Convert timestamp to seconds and then minutes
+city_stops_filtered[, time_to_sec := gtfstools:::cpp_time_to_seconds(timestamp)]
+city_stops_filtered[, minu_time := round(time_to_sec / 60, 1)]
+city_stops_filtered <- city_stops_filtered[!is.na(time_to_sec) & minu_time < 1440]
+
+# Create time bins of different intervals
+# 10 min intervals
+tp2_10 <- sprintf("%02d", rep(0:23, each = 6))
+label_10min <- paste0(tp2_10, c(":00", ":10", ":20", ":30", ":40", ":50"))
+city_stops_filtered[, time_10min := cut(minu_time, breaks = seq(0, 1440, by = 10), right = FALSE, labels = label_10min)]
+
+# 4. Calculate Frequency (N) per Stop/Bin
+city_stops_filtered[, N_10min := .N, by = .(stop_id, time_10min)]
+
+# Create a final spatial object of unique stops for r5r and visualization
+stops_sf <- sf::st_as_sf(city_stops_filtered[, .SD[1], by = .(stop_id)],
+                         coords = c("shape_pt_lon", "shape_pt_lat"), crs = 4326)
+
+# 5. Reshape Data to Long Format
+# Create a unique frequency table for our chosen interval
+freq_10min <- unique(city_stops_filtered[!is.na(time_10min), .(stop_id, time = as.character(time_10min), N = N_10min)])[, time_interval := "10 min"]
+
+# For this analysis, we will proceed only with the 10-minute interval data
+stops_freq_long <- freq_10min
+
+# Clean up large intermediate objects
+rm(city_stops_raw, unique_stops_sf, stops_inside_city_sf, ids_stops_inside_city, city_gps_files)
+gc()
+```
+
+### Visualize Peak Hour Transit Service
+
+The map below shows the spatial distribution of transit service during the morning peak hour (8:00 AM - 9:00 AM). The color of each hexagon corresponds to the number of vehicles scheduled to arrive at the stops within it during this one-hour window.
+
+```{r}
+#| label: map-peak-hour-frequency
+#| echo: false
+
+# 1. Calculate Peak Hour Frequency per Stop
+peak_hour_times <- c("08:00", "08:10", "08:20", "08:30", "08:40", "08:50")
+peak_freq_by_stop <- stops_freq_long[time %in% peak_hour_times, .(peak_N = sum(N)), by = stop_id]
+
+# 2. Join Frequencies to Spatial Stop Data
+stops_peak_sf <- merge(stops_sf, peak_freq_by_stop, by = "stop_id")
+
+# 3. Spatially Join Stops to Hexagon Grid
+# Define the projected CRS for consistency.
+projected_crs <- as.numeric(params$wgs84_utm_code)
+
+# Transform the stops data to the projected CRS.
+stops_peak_proj <- sf::st_transform(stops_peak_sf, crs = projected_crs)
+
+city_hex_grid_final <- sf::st_set_crs(city_hex_grid_final, value = projected_crs)
+
+# Perform the spatial join
+stops_in_hex_proj <- sf::st_join(stops_peak_proj, city_hex_grid_final, join = sf::st_within)
+
+# 4. Aggregate Frequencies per Hexagon
+stops_in_hex_dt <- data.table::setDT(sf::st_drop_geometry(stops_in_hex_proj))
+hex_peak_freq_agg <- stops_in_hex_dt[!is.na(hex_id), .(
+  total_peak_freq = sum(peak_N, na.rm = TRUE)
+), by = hex_id]
+
+# 5. Merge Aggregated Data Back to Hex Grid
+city_hex_grid_peak <- merge(city_hex_grid_final, hex_peak_freq_agg, by = "hex_id", all.x = TRUE)
+city_hex_grid_peak$total_peak_freq[is.na(city_hex_grid_peak$total_peak_freq)] <- 0
+
+# 6. Create and Store the New Plot Object
+peak_freq_hex_plot <- ggplot() +
+  geom_sf(data = city_bound_proj, fill = "grey20", color = "grey40") +
+  geom_sf(data = city_hex_grid_peak, aes(fill = total_peak_freq), color = NA) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    name = "Total Arrivals\nper Hexagon",
+    na.value = "grey20"
+  ) +
+  labs(
+    title = "Transit Service Frequency During Morning Peak",
+    subtitle = "8:00 AM - 9:00 AM on a typical weekday",
+    caption = "Color represents total scheduled vehicle arrivals in each hexagon."
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    plot.caption = element_text(hjust = 0.5, size = 8),
+    legend.position = "bottom",
+  )
+
+# Display the plot
+print(peak_freq_hex_plot)
+
+# Define the file path for the peak frequency map
+path_peak_freq_plot <- fs::path(dir_city_figures, paste0(city_prefix, "_peak_hour_frequency_map.png"))
+
+# Save the plot
+ggplot2::ggsave(
+  filename = path_peak_freq_plot,
+  plot = peak_freq_hex_plot,
+  width = 8,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+## Modeling Accessibility: Distance-Decayed Frequency
+
+In this section of the analysis, the method used to measure transit service departs from that used in Raphael Pereira's 2022 paper. Originally, to evaluate the level of service available to the population of a given hexagon during some time window, the method was to count the number of stop events which occurred within the bounds of that hexagon, during that time window.
+
+This container-based method measures the frequency of transit service that exists within discrete hexagonal plots of land. However, transit serves people, not land, and so this method fails to capture how people access transit. The service "experienced" by residents of one hexagon is actually a function of the service in a walkable radius around them, crossing multiple hexagonal boundaries.
+
+This new method improves upon a container-based approach by modeling how people access transit in the real world. The UN-Habitat framework (2018), referenced by Pereira (2022), notes that while a simple 0.5 km buffer around a stop is common practice for defining access, measures based on network distance and travel time are more realistic as they account for street layouts and pedestrian barriers. Our approach implements this more advanced concept. Instead of treating service as only available within a hexagon, we model how the value of a transit stop's frequency decreases as the walking time to reach it increases. This is accomplished using a negative exponential decay function controlled by a `beta` parameter, which dictates how sensitive accessibility is to walking time. Based on the UN-Habitat 500-meter guideline (approximately a 6-minute walk), a `beta` of `0.1` was selected. This value signifies that a stop at this 6-minute threshold still retains over 50% of its potential service value, creating a "soft" and more realistic catchment area instead of a hard boundary. This results in a comprehensive accessibility score for each residential hexagon that reflects the walkable transit network available to its residents.
+
+UN-Habitat (2018) SDG 11+ metadata: a guide to assist national and local governments to monitor and report on SDG goal 11+ indicators; UN-Habitat: Nairobi, Kenya. <https://www.local2030.org/library/60/SDG-Goal-11-Monitoring-Framework-A-guide-to-assist-national-and-local-governments-tomonitor-and-report-on-SDG-goal-11-indicators.pdf>
+
+### Prepare Street Network and Routing Engine
+
+The `r5r` package requires a clipped OpenStreetMap (`.osm.pbf`) file that covers the study area. Clipping is best done with an external command-line tool.
+
+::: callout-note
+### Clipping OSM files on Windows
+
+This analysis requires a clipped OpenStreetMap `.osm.pbf` file to stay within the memory limits of the `r5r` package. The tool, `osmium-tool`, runs on Linux. For Windows users, the recommended approach is to use the Windows Subsystem for Linux (WSL).
+
+**1. Install WSL (Windows Subsystem for Linux)**
+
+Follow the official Microsoft guide to install WSL and the **Ubuntu** distribution.
+
+**2. Install `osmium-tool` in Ubuntu**
+
+Once WSL/Ubuntu is running, open the Ubuntu terminal and run the following two commands in order: - `sudo apt-get update` - `sudo apt-get install osmium-tool`
+
+**3. How to Clip a `.pbf` File**
+
+-   **Get Bounding Box:** From your R session, get the bounding box of your city's boundary: `sf::st_bbox(city_bound_sf)`
+-   **Navigate and Clip:** Open your Ubuntu terminal, navigate to your project's `data-raw` folder, and use the `osmium extract` command with the bounding box coordinates (XMIN, YMIN, XMAX, YMAX). The command will look like this, creating the clipped file inside your city's data folder: `osmium extract -b -79.64,43.58,-79.12,43.86 data-raw/toronto_full.osm.pbf -o toronto/data/toronto_clipped.osm.pbf --overwrite`
+:::
+
+With the clipped PBF file in place, we can now set up the routing engine. We define our **origins** as the centroids of the residential areas within each populated hexagon and our **destinations** as the transit stops.
+
+```{r}
+#| label: setup-r5r
+#| cache: true
+
+# Define path to the pre-clipped OpenStreetMap street network file
+path_pbf_clipped <- fs::path(dir_city_data, paste0(params$city_name, "_clipped.osm.pbf"))
+
+# Stop if the required clipped PBF file does not exist
+if (!fs::file_exists(path_pbf_clipped)) {
+  stop(
+    "Clipped PBF file not found at: ", path_pbf_clipped, "\n",
+    "Please run the 'osmium extract' command in a terminal first (see instructions)."
+  )
+}
+
+# Prepare Origins
+origins_sf <- city_hex_grid_final %>%
+  filter(!is.na(apportioned_pop) & apportioned_pop > 0) %>%
+  sf::st_centroid()
+
+origins_sf <- sf::st_set_crs(origins_sf, as.numeric(params$wgs84_utm_code))
+
+origins_sf$id <- as.character(origins_sf$hex_id)
+origins_sf <- sf::st_transform(origins_sf, 4326)
+
+
+# Prepare Destinations
+stops_sf$id <- as.character(stops_sf$stop_id)
+destinations_sf <- sf::st_transform(stops_sf, 4326)
+
+# Stop lingering r5r/java processes
+try(r5r::stop_r5(), silent = TRUE)
+Sys.sleep(2)
+
+# Setup r5r Core
+# Define a dedicated directory for the files r5r will use to build the graph.
+dir_r5r_data <- fs::path(dir_city_data, "r5r_graph_data")
+fs::dir_create(dir_r5r_data)
+fs::file_delete(fs::dir_ls(dir_r5r_data)) # Clear old files
+
+# Copy the clipped street network and the GTFS file to the dedicated directory.
+fs::file_copy(path = path_pbf_clipped, new_path = dir_r5r_data)
+fs::file_copy(path = gtfs_raw, new_path = dir_r5r_data, overwrite = TRUE)
+
+# Build the r5r routing engine.
+r5r_core <- r5r::setup_r5(data_path = dir_r5r_data, verbose = FALSE)
+```
+
+### Calculate Walking Access Times
+
+Now we use the routing engine to calculate a travel time matrix. This will compute the walking time from every origin point (residential centroids) to every destination (transit stops) within a 20-minute walking radius.
+
+```{r}
+#| label: calculate-walk-times
+#| cache: true
+
+walk_times_dt <- r5r::travel_time_matrix(
+  r5r_core = r5r_core,
+  origins = origins_sf,
+  destinations = destinations_sf,
+  mode = c("WALK"),
+  max_walk_time = 20,
+  verbose = FALSE
+)
+
+r5r::stop_r5()
+rm(r5r_core)
+gc()
+```
+
+### Calculate Final Accessibility Score
+
+This is the final step where all data sources are combined. We loop through each 10-minute time bin of the day and perform these calculations:
+
+**1. Calculate Walk Decay Weight**: For each origin-stop pair, a weight between 0 and 1 is calculated based on the walking time. A short walk gets a weight near 1; a long walk gets a weight near 0.
+
+**2. Calculate Weighted Service**: The frequency at each stop (N) is multiplied by its corresponding walk decay weight.
+
+**3. Aggregate to Origin**: For each origin hexagon, we sum up the weighted service from all nearby stops to get the final decayed_frequency score for that time bin.
+
+```{r}
+#| label: calculate-decayed-frequency
+#| cache: true
+
+# 1. Prepare Data for Calculation
+# Define the negative exponential decay function and its sensitivity parameter (beta)
+beta <- 0.1 # A higher beta means a steeper drop-off in service value with walking time
+decay_function <- function(time, beta_value) { exp(-beta_value * time) }
+
+# Calculate a static decay weight for each origin-stop pair based on walking time
+walk_times_dt[, weight := decay_function(travel_time_p50, beta)]
+
+# Prepare the time-binned frequency data for joining
+binned_freq_dt <- stops_freq_long[time_interval == "10 min", ]
+
+# 2. Loop Through Time Bins and Calculate Scores
+unique_time_bins <- unique(binned_freq_dt$time)
+
+list_of_scores <- pbapply::pblapply(unique_time_bins, function(current_bin) {
+  # Filter for frequencies in the current time bin
+  freq_this_bin <- binned_freq_dt[time == current_bin]
+  
+  # Merge these time-specific frequencies with the static walking time data
+  merged_dt <- merge(walk_times_dt, freq_this_bin, by.x = "to_id", by.y = "stop_id")
+  
+  # Calculate the weighted service (frequency * decay_weight)
+  merged_dt[, weighted_service := N * weight]
+  
+  # Sum the weighted service for each residential origin to get the final score
+  score_this_bin <- merged_dt[, .(decayed_frequency = sum(weighted_service, na.rm = TRUE)), by = from_id]
+  
+  # Add a column to identify the time bin
+  score_this_bin[, time := current_bin]
+  
+  return(score_this_bin)
+})
+
+time_varying_scores_dt <- data.table::rbindlist(list_of_scores)
+
+# 3. Assemble Final Data for Plotting
+# Get the population and income attributes from our origins
+origin_attributes_dt <- as.data.table(sf::st_drop_geometry(
+  origins_sf[, c("id", "apportioned_pop", "income_decile")]
+))
+
+# Join the calculated scores with the origin attributes
+final_plot_data_dt <- merge(
+  time_varying_scores_dt,
+  origin_attributes_dt,
+  by.x = "from_id",
+  by.y = "id"
+)
+
+# Save the final data object to an RDS file
+path_final_plot_data_rds <- fs::path(dir_city_data, paste0(city_prefix, "_final_plot_data.rds"))
+readr::write_rds(final_plot_data_dt, path_final_plot_data_rds, compress = "gz")
+```
+
+# Results: Transit Service Equity Analysis
+
+This final section presents the results of the analysis. We aggregate the accessibility scores calculated in the previous step to get a single service score for each income decile at each 10-minute interval of the day. This allows for a direct comparison of the level of service experienced by different socioeconomic groups over time. The results are visualized in a 2D plot and a corresponding 3D plot for a more intuitive interpretation.
+
+```{r}
+#| label: prep-final-data
+#| cache: true 
+
+# 1. Load Final Data
+path_final_plot_data_rds <- fs::path(dir_city_data, paste0(city_prefix, "_final_plot_data.rds"))
+final_plot_data_dt <- readr::read_rds(path_final_plot_data_rds)
+
+# 2. Aggregate Data for Plotting
+plot_data_agg <- final_plot_data_dt[!is.na(income_decile), .(
+  weighted_mean_freq = weighted.mean(decayed_frequency, apportioned_pop, na.rm = TRUE)
+), by = .(time, income_decile)]
+
+# 3. Define the 2D plot object
+fixed_time <- c("00:00", "04:00", "08:00", "12:00", "16:00", "20:00", "23:00")
+plot_2d <- ggplot(plot_data_agg) +
+  geom_tile(aes(x = time, y = as.factor(income_decile), fill = weighted_mean_freq)) +
+  scale_x_discrete(breaks = fixed_time, labels = fixed_time, drop = TRUE) +
+  coord_cartesian(expand = FALSE) +
+  labs(
+    title = NULL,
+    x = "Time of Day (10-minute intervals)",
+    y = "Income Decile"
+  ) +
+  scale_fill_continuous(
+    type = "viridis",
+    direction = +1,
+    name = "Mean Distance-Decayed\nService Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.title.position = "plot",
+    plot.background = element_rect(fill = "white", colour = "white"),
+    axis.text.x = element_text(angle = 0),
+    legend.position = "right",
+    legend.text.position = "left",
+    legend.title.position = "bottom",
+    legend.title.align = 0.5,
+    legend.title = element_text(size = 8),
+    legend.key.width = unit(0.5, "cm")
+  ) +
+  guides(fill = guide_colourbar())
+
+# Save the 2D plot
+path_plot_2d <- fs::path(dir_city_figures, paste0(city_prefix, "_transit_service_equity_2d.png"))
+ggplot2::ggsave(
+  plot = plot_2d,
+  filename = path_plot_2d,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  scale = 0.8,
+  bg = "white"
+)
+
+# Render the 3D plot with Rayshader
+# Ensure the RGL window is clear before plotting
+rgl::clear3d()
+
+rayshader::plot_gg(
+  ggobj = plot_2d,
+  multicore = TRUE,
+  width = 5,
+  height = 5,
+  scale = 250,
+  windowsize = c(1400, 866),
+  zoom = 0.539,
+  phi = 30.447,
+  theta = -23.225
+)
+
+Sys.sleep(5)
+
+# Save the 3D plot snapshot
+path_plot_3d <- fs::path(dir_city_figures, paste0(city_prefix, "_transit_service_equity_3d.png"))
+rayshader::render_snapshot(
+  filename = path_plot_3d,
+  width = 1500,
+  height = 1500
+)
+```
+
+## Final Visualizations {.panel-tabset}
+
+### 2-D Plot
+
+```{r}
+#| label: display-2d-plot
+#| echo: false
+#| fig-cap: "A 2D plot showing the average transit service frequency for each income decile across 10-minute intervals."
+
+print(plot_2d)
+```
+
+### 3-D Plot
+
+```{r}
+#| label: display-3d-plot
+#| echo: false
+#| fig-cap: "A 3D representation of the transit service data, offering an intuitive view of service peaks and valleys."
+knitr::include_graphics(path_plot_3d)
+```

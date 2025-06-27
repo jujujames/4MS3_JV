@@ -42,7 +42,7 @@ view_tmp_stops <- data.table::copy(tmp_stops) %>%
                            , multipoint_id = "shape_id") %>%
   sf::st_set_crs(4326) %>% # WGS 1984
   sf::st_transform(32617) %>% # UTM zone 17N
-  mapview()
+  mapview::mapview()
 
 # points to line
 tmp_line <- data.table::copy(tmp_gps) %>%
@@ -79,7 +79,7 @@ osm_bbox = tmp_gps_bbox %>%
 
 
 view_osm_bbox <- sf::st_bbox(tmp_gps_bbox) %>% 
-  mapview()
+  mapview::mapview()
 
 ## read tile -----
 
