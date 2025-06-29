@@ -12,10 +12,14 @@ format:
 params:
   city_name: "toronto"
   csd_code: "3520005"
-  gtfs_file: "ttc_gtfs.zip"
+  gtfs_files: 
+    - "ttc_gtfs.zip"
+    - "UP-GTFS.zip"
+    - "GO-GTFS.zip"
   ghs_built_c_file: "GHS_BUILT_C_FUN_E2018_GLOBE_R2023A_54009_10_V1_0_R4_C12.tif"
   wgs84_utm_code: "32617"
   census_dataset: "CA21"
+  analysis_date: "2025-06-25"
   analysis_day: "wednesday"
 execute:
   echo: true
@@ -53,7 +57,6 @@ city_basedir <- here::here(city_prefix)
 dir_city_data <- fs::path(city_basedir, "data")
 dir_city_figures <- fs::path(city_basedir, "figures")
 dir_raw_data <- here::here("data-raw")
-gtfs_raw <- fs::path(dir_raw_data, params$gtfs_file)
 ghs_built_c_raw <- fs::path(dir_raw_data, params$ghs_built_c_file)
 dir_census_cache <- fs::path(dir_city_data, "cancensus_cache")
 dir_gps <- fs::path(dir_city_data, "gps")
@@ -92,15 +95,21 @@ Both of the following files should be downloaded to the `data-raw` directory.
 ```{r}
 #| label: setup-validate-files
 
-# Validate GTFS file
-if (!fs::file_exists(gtfs_raw)) {
-  stop(
-    "GTFS file not found at: ", gtfs_raw, "\n",
-    "Ensure the file '", params$gtfs_file, "' exists in the '", dir_raw_data, "' directory."
-  )
-} else {
-  message("GTFS file located: ", gtfs_raw)
-}
+# Validate GTFS files
+message("Validating GTFS files...")
+gtfs_paths_raw <- fs::path(dir_raw_data, params$gtfs_files)
+
+# Loop through each path and check for existence
+lapply(gtfs_paths_raw, function(file_path) {
+  if (!fs::file_exists(file_path)) {
+    stop(
+      "Required GTFS file not found at: ", file_path, "\n",
+      "Ensure all files listed under 'gtfs_files' in the YAML header exist in the '", dir_raw_data, "' directory."
+    )
+  } else {
+    message("GTFS file located: ", file_path)
+  }
+})
 
 # Validate GHS_BUILT_C raster file
 if (!fs::file_exists(ghs_built_c_raw)) {
@@ -147,8 +156,9 @@ library(terra)
 library(raster)
 
 # GTFS processing
+library(tidytransit)
 library(gtfstools)     
-library(gtfs2gps)      
+library(gtfs2gps)
 
 # R5R processing
 library(r5r)
@@ -217,16 +227,70 @@ mapview::mapview(city_bound_sf, layer.name = "City Boundary")
 
 ## Transit Data (GTFS)
 
-Next, we load the GTFS file for the city's transit agency and filter it to include only the services running on the specific day of the week chosen for the analysis (e.g., 'wednesday').
+Next, we load the GTFS file for the city's transit agency and filter it to include only the services running on the specific date/day of the week chosen for the analysis (e.g., 'wednesday').
 
 ```{r}
 #| label: load-gtfs
 
-# Load GTFS Data
-city_gtfs <- gtfstools::read_gtfs(path = gtfs_raw)
+# Construct the full paths to the GTFS files
+gtfs_paths_raw <- fs::path(dir_raw_data, params$gtfs_files)
 
-# Filter GTFS by the specified analysis day
-city_gtfs_filtered <- gtfstools::filter_by_weekday(city_gtfs, weekday = params$analysis_day)
+# Define the target date and day of the week from parameters
+analysis_date <- as.Date(params$analysis_date)
+analysis_day <- weekdays(analysis_date, abbreviate = FALSE) |> tolower()
+
+# Load and filter each GTFS file using a date-based method
+list_city_gtfs_filtered <- lapply(gtfs_paths_raw, function(path) {
+  
+  agency_name <- fs::path_file(path)
+  message(paste("Processing:", agency_name))
+  
+  gtfs_data <- gtfstools::read_gtfs(path = path, quiet = TRUE)
+  
+  # Service ID filtering
+  
+  # 1. Get service_ids from calendar.txt based on the day of the week
+  service_ids_base <- character(0)
+  if ("calendar" %in% names(gtfs_data)) {
+    if (analysis_day %in% names(gtfs_data$calendar)) {
+      # Ensure service_id is character
+      gtfs_data$calendar[, service_id := as.character(service_id)]
+      service_ids_base <- gtfs_data$calendar[get(analysis_day) == 1, service_id]
+    }
+  }
+
+  # 2. Get service_id exceptions from calendar_dates.txt
+  service_ids_added <- character(0)
+  service_ids_removed <- character(0)
+  if ("calendar_dates" %in% names(gtfs_data)) {
+    # Ensure service_id is character and exception_type is integer
+    gtfs_data$calendar_dates[, service_id := as.character(service_id)]
+    gtfs_data$calendar_dates[, exception_type := as.integer(exception_type)]
+    
+    # Get services added on the analysis_date
+    service_ids_added <- gtfs_data$calendar_dates[date == analysis_date & exception_type == 1, service_id]
+    
+    # Get services removed on the analysis_date
+    service_ids_removed <- gtfs_data$calendar_dates[date == analysis_date & exception_type == 2, service_id]
+  }
+
+  # 3. Combine to get the final list of service_ids for the specific date
+  service_ids_final <- union(service_ids_base, service_ids_added)
+  service_ids_final <- setdiff(service_ids_final, service_ids_removed)
+  
+  # 4. Filter the entire GTFS object by the final service_ids
+  gtfs_filtered <- gtfstools::filter_by_service_id(gtfs_data, service_ids_final)
+
+  # Add a source column to each relevant data.table for identification
+  if("stops" %in% names(gtfs_filtered)) gtfs_filtered$stops[, source := agency_name]
+  if("routes" %in% names(gtfs_filtered)) gtfs_filtered$routes[, source := agency_name]
+  if("trips" %in% names(gtfs_filtered)) gtfs_filtered$trips[, source := agency_name]
+  
+  return(gtfs_filtered)
+})
+
+# Name the list elements
+names(list_city_gtfs_filtered) <- fs::path_file(gtfs_paths_raw)
 ```
 
 ## Built-Up Area Data (GHS-BUILT-C)
@@ -577,27 +641,66 @@ The goal of this section is to calculate our primary metric of transit service: 
 
 ### Convert GTFS to GPS-like Records
 
+Execute the following code block in order to clear previous `gtfs2gps` output.
+
+```{r}
+#| label: clear-gps-output
+#| echo: false
+#| eval: false
+
+# Get a list of all files and subdirectories within the main GPS output directory
+old_gps_files <- fs::dir_ls(dir_gps)
+
+# Check files to delete
+if (length(old_gps_files) > 0) {
+  # Delete all contents (both files and subdirectories)
+  fs::file_delete(old_gps_files)
+  message("Successfully cleared the '", dir_gps, "' directory.")
+} else {
+  message("The '", dir_gps, "' directory is already empty.")
+}
+```
+
 The `gtfs2gps()` function interpolates the space-time position of each vehicle for every trip, creating a detailed dataset akin to GPS records. This is the most computationally intensive step of the analysis.
 
 ```{r}
 #| label: run-gtfs2gps
-#| eval: false
 #| cache: true
 
-# Convert the filtered GTFS data to GPS format. This function writes one file per
-# trip to the specified directory. with_progress() shows a progress bar.
-progressr::with_progress(
-  gtfs2gps::gtfs2gps(
-    gtfs_data = city_gtfs_filtered,
-    filepath = dir_gps
-  )
-)
-```
+# This chunk processes each GTFS feed separately, but first checks if the output already exists.
 
-```{r}
-#| label: check-gtfs2gps
-list_gps_files <- list.files(dir_gps, full.names = TRUE)
-message("Number of GPS files created: ", length(list_gps_files))
+for (agency_name in names(list_city_gtfs_filtered)) {
+
+  # Define the dedicated subdirectory for this agency's GPS files
+  agency_dir_name <- tools::file_path_sans_ext(agency_name)
+  dir_gps_agency <- fs::path(dir_gps, agency_dir_name)
+
+  # Check if the directory exists and already contains files
+  if (fs::dir_exists(dir_gps_agency) && length(fs::dir_ls(dir_gps_agency, type = "file")) > 0) {
+    
+    # If it's populated, skip processing and notify the user
+    num_files <- length(fs::dir_ls(dir_gps_agency, type = "file"))
+    message(paste("\n Skipping:", agency_name))
+    message(paste("Output directory '", fs::path_file(dir_gps_agency), "' already exists and contains", format(num_files, big.mark=","), "files."))
+    
+  } else {
+    
+    # If not, create the directory and run the conversion
+    fs::dir_create(dir_gps_agency)
+    
+    message(paste("\n Starting gtfs2gps for:", agency_name))
+    message(paste("Outputting to:", dir_gps_agency))
+
+    progressr::with_progress(
+      gtfs2gps::gtfs2gps(
+        gtfs_data = list_city_gtfs_filtered[[agency_name]],
+        parallel = FALSE,
+        filepath = dir_gps_agency
+      )
+    )
+    message(paste("Finished processing:", agency_name, "\n"))
+  }
+}
 ```
 
 ### Calculate Stop Frequencies in Time Bins
@@ -618,15 +721,39 @@ With the GPS-like data generated, we can now calculate service frequencies. We p
 #| label: calculate-frequencies
 #| cache: true
 
-# 1. Read and Combine Stop Events
-city_gps_files <- list.files(dir_gps, full.names = TRUE)
-city_stops_raw <- pbapply::pblapply(city_gps_files, data.table::fread,
-  select = c('shape_id', 'trip_id', 'stop_id', 'timestamp', 'dist', 'shape_pt_lat', 'shape_pt_lon')
-) %>% data.table::rbindlist(fill = TRUE)
+# 1. Read and Combine Stop Events from All Agency Subdirectories
+
+# List all agency-specific data directories created by the previous step
+list_gps_dirs <- fs::dir_ls(dir_gps, type = "directory")
+
+# Use pblapply to loop through each directory, read its files, and add a source identifier
+list_of_agency_dts <- pbapply::pblapply(list_gps_dirs, function(agency_dir) {
+  
+  # Get the agency name from the directory path (e.g., "ttc_gtfs")
+  agency_name <- fs::path_file(agency_dir)
+  
+  # List all individual trip files for this agency
+  agency_gps_files <- fs::dir_ls(agency_dir, type = "file")
+  
+  # Read and combine all files for this one agency
+  agency_dt <- lapply(agency_gps_files, data.table::fread,
+    select = c('shape_id', 'trip_id', 'stop_id', 'timestamp', 'dist', 'shape_pt_lat', 'shape_pt_lon')
+  ) %>% data.table::rbindlist(fill = TRUE)
+  
+  # Add the crucial source identifier column
+  agency_dt[, source := agency_name]
+  
+  return(agency_dt)
+})
+
+# Combine the data.tables from all agencies into one large data.table
+city_stops_raw <- data.table::rbindlist(list_of_agency_dts, fill = TRUE)
+message(paste("Combined", format(nrow(city_stops_raw), big.mark=","), "stop events from", length(list_of_agency_dts), "agencies."))
 
 # Filter for actual stop events (where stop_id is present)
 city_stops_raw <- city_stops_raw[!is.na(stop_id)]
 city_stops_raw[, stop_id := as.character(stop_id)]
+
 
 # 2. Filter Stops to City Boundary
 # Create an sf object of unique stop locations for spatial filtering
@@ -640,6 +767,8 @@ ids_stops_inside_city <- stops_inside_city_sf$stop_id
 
 # Filter the main data table to keep only stops inside the city
 city_stops_filtered <- city_stops_raw[stop_id %in% ids_stops_inside_city, ]
+message(paste("Filtered to", format(length(unique(city_stops_filtered$stop_id)), big.mark=","), "unique stops within the city boundary."))
+
 
 # 3. Create Time Bins
 # Convert timestamp to seconds and then minutes
@@ -647,20 +776,23 @@ city_stops_filtered[, time_to_sec := gtfstools:::cpp_time_to_seconds(timestamp)]
 city_stops_filtered[, minu_time := round(time_to_sec / 60, 1)]
 city_stops_filtered <- city_stops_filtered[!is.na(time_to_sec) & minu_time < 1440]
 
-# Create time bins of different intervals
-# 10 min intervals
+# Create time bins for 10-minute intervals
 tp2_10 <- sprintf("%02d", rep(0:23, each = 6))
 label_10min <- paste0(tp2_10, c(":00", ":10", ":20", ":30", ":40", ":50"))
 city_stops_filtered[, time_10min := cut(minu_time, breaks = seq(0, 1440, by = 10), right = FALSE, labels = label_10min)]
 
+
 # 4. Calculate Frequency (N) per Stop/Bin
 city_stops_filtered[, N_10min := .N, by = .(stop_id, time_10min)]
 
-# Create a final spatial object of unique stops for r5r and visualization
-stops_sf <- sf::st_as_sf(city_stops_filtered[, .SD[1], by = .(stop_id)],
+
+# 5. Create a final spatial object of unique stops for r5r and visualization
+stops_sf_data <- city_stops_filtered[, .SD[1], by = .(stop_id)]
+stops_sf <- sf::st_as_sf(stops_sf_data,
                          coords = c("shape_pt_lon", "shape_pt_lat"), crs = 4326)
 
-# 5. Reshape Data to Long Format
+
+# 6. Reshape Data to Long Format
 # Create a unique frequency table for our chosen interval
 freq_10min <- unique(city_stops_filtered[!is.na(time_10min), .(stop_id, time = as.character(time_10min), N = N_10min)])[, time_interval := "10 min"]
 
@@ -668,7 +800,7 @@ freq_10min <- unique(city_stops_filtered[!is.na(time_10min), .(stop_id, time = a
 stops_freq_long <- freq_10min
 
 # Clean up large intermediate objects
-rm(city_stops_raw, unique_stops_sf, stops_inside_city_sf, ids_stops_inside_city, city_gps_files)
+rm(list_of_agency_dts, city_stops_raw, unique_stops_sf, stops_inside_city_sf, ids_stops_inside_city, stops_sf_data)
 gc()
 ```
 
@@ -783,6 +915,26 @@ Once WSL/Ubuntu is running, open the Ubuntu terminal and run the following two c
 
 With the clipped PBF file in place, we can now set up the routing engine. We define our **origins** as the centroids of the residential areas within each populated hexagon and our **destinations** as the transit stops.
 
+### Merge GTFS files
+
+To ensure r5r has a complete network of all transit services, we must first merge the individual GTFS objects into a single, unified feed.
+
+```{r}
+#| label: merge-gtfs-feeds
+#| cache: true
+
+# Use the list of filtered GTFS objects created in the 'load-gtfs' chunk
+merged_gtfs <- gtfstools::merge_gtfs(list_city_gtfs_filtered)
+
+# Define the path for the new merged GTFS file
+path_gtfs_merged <- fs::path(dir_city_data, "merged_gtfs.zip")
+
+# Write the merged GTFS object to a new .zip file
+gtfstools::write_gtfs(merged_gtfs, path = path_gtfs_merged)
+```
+
+### Build Routing Engine
+
 ```{r}
 #| label: setup-r5r
 #| cache: true
@@ -804,7 +956,6 @@ origins_sf <- city_hex_grid_final %>%
   sf::st_centroid()
 
 origins_sf <- sf::st_set_crs(origins_sf, as.numeric(params$wgs84_utm_code))
-
 origins_sf$id <- as.character(origins_sf$hex_id)
 origins_sf <- sf::st_transform(origins_sf, 4326)
 
@@ -823,9 +974,9 @@ dir_r5r_data <- fs::path(dir_city_data, "r5r_graph_data")
 fs::dir_create(dir_r5r_data)
 fs::file_delete(fs::dir_ls(dir_r5r_data)) # Clear old files
 
-# Copy the clipped street network and the GTFS file to the dedicated directory.
+# Copy the clipped street network and the NEWLY MERGED GTFS file
 fs::file_copy(path = path_pbf_clipped, new_path = dir_r5r_data)
-fs::file_copy(path = gtfs_raw, new_path = dir_r5r_data, overwrite = TRUE)
+fs::file_copy(path = path_gtfs_merged, new_path = dir_r5r_data, overwrite = TRUE)
 
 # Build the r5r routing engine.
 r5r_core <- r5r::setup_r5(data_path = dir_r5r_data, verbose = FALSE)
