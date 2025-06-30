@@ -6,3 +6,7 @@ gps/
 r5r_graph_data/
 rjavaenv/
 quarto-1.4.554-linux-amd64.deb
+cancensus_cache/
+geofabrik_british-columbia-latest.gpkg
+geofabrik_british-columbia-latest.osm.pbf
+geofabrik_ontario-latest.osm.pbf
