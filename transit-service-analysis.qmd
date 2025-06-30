@@ -10,14 +10,12 @@ format:
     self-contained: true
     code-fold: true
 params:
-  city_name: "toronto"
-  csd_code: "3520005"
+  city_name: "vancouver"
+  csd_code: "5915022"
   gtfs_files: 
-    - "ttc_gtfs.zip"
-    - "UP-GTFS.zip"
-    - "GO-GTFS.zip"
-  ghs_built_c_file: "GHS_BUILT_C_FUN_E2018_GLOBE_R2023A_54009_10_V1_0_R4_C12.tif"
-  wgs84_utm_code: "32617"
+    - "translink_gtfs.zip"
+  ghs_built_c_file: "GHS_BUILT_C_FUN_E2018_GLOBE_R2023A_54009_10_V1_0_R4_C9.tif"
+  wgs84_utm_code: "32610"
   census_dataset: "CA21"
   analysis_date: "2025-06-25"
   analysis_day: "wednesday"
@@ -239,21 +237,24 @@ gtfs_paths_raw <- fs::path(dir_raw_data, params$gtfs_files)
 analysis_date <- as.Date(params$analysis_date)
 analysis_day <- weekdays(analysis_date, abbreviate = FALSE) |> tolower()
 
-# Load and filter each GTFS file using a date-based method
+# Load and filter each GTFS file
 list_city_gtfs_filtered <- lapply(gtfs_paths_raw, function(path) {
   
   agency_name <- fs::path_file(path)
-  message(paste("Processing:", agency_name))
+  message(paste("--> Processing:", agency_name))
   
   gtfs_data <- gtfstools::read_gtfs(path = path, quiet = TRUE)
   
-  # Service ID filtering
+  # Check for and convert frequency-based schedules
+  if ("frequencies" %in% names(gtfs_data) && nrow(gtfs_data$frequencies) > 0) {
+    message("Frequency-based schedule. Converting to stop times...")
+    gtfs_data <- gtfstools::frequencies_to_stop_times(gtfs_data)
+  }
   
   # 1. Get service_ids from calendar.txt based on the day of the week
-  service_ids_base <- character(0)
+  service_ids_base <- character(0) 
   if ("calendar" %in% names(gtfs_data)) {
     if (analysis_day %in% names(gtfs_data$calendar)) {
-      # Ensure service_id is character
       gtfs_data$calendar[, service_id := as.character(service_id)]
       service_ids_base <- gtfs_data$calendar[get(analysis_day) == 1, service_id]
     }
@@ -263,14 +264,10 @@ list_city_gtfs_filtered <- lapply(gtfs_paths_raw, function(path) {
   service_ids_added <- character(0)
   service_ids_removed <- character(0)
   if ("calendar_dates" %in% names(gtfs_data)) {
-    # Ensure service_id is character and exception_type is integer
     gtfs_data$calendar_dates[, service_id := as.character(service_id)]
     gtfs_data$calendar_dates[, exception_type := as.integer(exception_type)]
     
-    # Get services added on the analysis_date
     service_ids_added <- gtfs_data$calendar_dates[date == analysis_date & exception_type == 1, service_id]
-    
-    # Get services removed on the analysis_date
     service_ids_removed <- gtfs_data$calendar_dates[date == analysis_date & exception_type == 2, service_id]
   }
 
@@ -289,7 +286,7 @@ list_city_gtfs_filtered <- lapply(gtfs_paths_raw, function(path) {
   return(gtfs_filtered)
 })
 
-# Name the list elements
+# Name the list elements for reference
 names(list_city_gtfs_filtered) <- fs::path_file(gtfs_paths_raw)
 ```
 
@@ -574,6 +571,22 @@ gc()
 ### Visualize Apportioned Census Data {.panel-tabset}
 
 The following maps allow us to visually inspect the results of the apportionment. We can see the spatial distribution of the estimated population and the resulting income deciles across the city.
+
+```{r}
+#| label: preprocess-hex-grid-for-plot
+
+# Filter out any non-polygon geometries
+original_rows <- nrow(city_hex_grid_final)
+city_hex_grid_final <- city_hex_grid_final[sf::st_geometry_type(city_hex_grid_final) == "POLYGON", ]
+if (nrow(city_hex_grid_final) < original_rows) {
+  message(paste("Removed", original_rows - nrow(city_hex_grid_final), "non-polygon geometries from city_hex_grid_final."))
+}
+
+# Replace NAs with 0
+city_hex_grid_final$apportioned_pop[is.na(city_hex_grid_final$apportioned_pop)] <- 0
+
+city_hex_grid_final$weighted_income[is.na(city_hex_grid_final$weighted_income)] <- 0
+```
 
 #### Population
 

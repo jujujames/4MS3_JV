@@ -3,7 +3,6 @@
 .RData
 .Ruserdata
 gps/
-toronto/data/geofabrik_ontario-latest.osm.pbf
 r5r_graph_data/
 rjavaenv/
 quarto-1.4.554-linux-amd64.deb
