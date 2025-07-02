@@ -10,12 +10,12 @@ format:
     self-contained: true
     code-fold: true
 params:
-  city_name: "vancouver"
-  csd_code: "5915022"
+  city_name: "montreal"
+  csd_code: "2466023"
   gtfs_files: 
-    - "translink_gtfs.zip"
-  ghs_built_c_file: "GHS_BUILT_C_FUN_E2018_GLOBE_R2023A_54009_10_V1_0_R4_C9.tif"
-  wgs84_utm_code: "32610"
+    - "stm_gtfs.zip"
+  ghs_built_c_file: "GHS_BUILT_C_FUN_E2018_GLOBE_R2023A_54009_10_V1_0_R4_C13.tif"
+  wgs84_utm_code: "32618"
   census_dataset: "CA21"
   analysis_date: "2025-06-25"
   analysis_day: "wednesday"

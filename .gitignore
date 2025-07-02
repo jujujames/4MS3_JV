@@ -10,3 +10,5 @@ cancensus_cache/
 geofabrik_british-columbia-latest.gpkg
 geofabrik_british-columbia-latest.osm.pbf
 geofabrik_ontario-latest.osm.pbf
+geofabrik_quebec-latest.gpkg
+geofabrik_quebec-latest.osm.pbf
